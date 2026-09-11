@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ATENÇÃO — isto é um risco ACEITO E DATADO, não uma decisão confortável.
+
+  O pareamento inicial e todo o tráfego atual acontecem por HTTP claro na rede
+  local, com o token no cabeçalho Authorization. Em uma LAN hostil (Wi-Fi
+  público, rede compartilhada), o token é legível por quem estiver no mesmo
+  segmento — e com ele se aprova ferramenta no Harness.
+
+  Por que ainda está assim: a Network Security Config do Android aceita
+  domínios, não faixas CIDR, e o IP do PC muda por DHCP. Não há como restringir
+  por endereço enquanto o caminho for HTTP direto.
+
+  Quando isto sai: na fase P2P. O túnel QUIC do iroh é TLS 1.3 fim a fim e não
+  precisa de cleartext nenhum; nesta base-config o atributo vira "false". Até
+  lá, use o app em rede de confiança.
+
+  Ver docs/ROADMAP.md, fase 3.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

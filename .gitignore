@@ -1,0 +1,16 @@
+# Build
+build/
+*/build/
+.gradle/
+.kotlin/
+# IDE
+.idea/
+*.iml
+*.hprof
+captures/
+# Segredos e caminhos da máquina
+local.properties
+local-maven/
+# Sistema
+.DS_Store
+*.log

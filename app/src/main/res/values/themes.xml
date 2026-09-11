@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!-- Tema escuro desde a primeira janela: sem ele aparece um flash branco antes
+         do Compose assumir o darkColorScheme. -->
+    <style name="Theme.PocketHound" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/ph_bg</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+</resources>

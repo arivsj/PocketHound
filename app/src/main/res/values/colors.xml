@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Paleta do splash/janela: espelha ui/theme/Color.kt -->
+    <color name="ph_void">#FF06030E</color>
+    <color name="ph_bg">#FF0A0716</color>
+    <color name="ph_violet">#FFB36BFF</color>
+</resources>
