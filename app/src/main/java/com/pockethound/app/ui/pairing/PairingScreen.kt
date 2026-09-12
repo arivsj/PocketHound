@@ -72,6 +72,24 @@ fun PairingRoute(
  * (as dependências já estão no build.gradle.kts) e fazer o handshake `hello`/`hello.ack`
  * para receber o token e gravá-lo no SecureStore.
  */
+/**
+ * Serializa o payload lido do QR de volta ao formato de texto.
+ *
+ * A tela guarda o payload cru para o parser continuar sendo a unica fonte da
+ * verdade sobre o que e um pareamento valido. Reconstruir campo a campo aqui
+ * criaria um segundo lugar que precisa saber o formato.
+ */
+private fun payloadCru(payload: PairingPayload): String {
+    val parametros = StringBuilder("pockethound://pair?v=").append(payload.version)
+    payload.pcName?.let { parametros.append("&n=").append(it) }
+    parametros.append("&t=").append(payload.ticket)
+    parametros.append("&k=").append(payload.key)
+    parametros.append("&x=").append(payload.expiresAt)
+    payload.address?.let { parametros.append("&a=").append(it) }
+    payload.code?.let { parametros.append("&c=").append(it) }
+    return parametros.toString()
+}
+
 @Composable
 fun PairingScreen(
     onPaired: () -> Unit,
@@ -87,6 +105,7 @@ fun PairingScreen(
     // dois na tela do PC. Quando o QR chegar, ele preenche os dois sozinho.
     var address by remember { mutableStateOf("") }
     var code by remember { mutableStateOf("") }
+    var mostrandoQr by remember { mutableStateOf(false) }
     val estado by viewModel.pairingState.collectAsState()
 
     // O QR preenche os campos quando traz os dois.
@@ -97,6 +116,22 @@ fun PairingScreen(
 
     LaunchedEffect(estado.done) {
         if (estado.done) onPaired()
+    }
+
+    // O leitor ocupa a tela inteira quando aberto; a tela de pareamento fica
+    // intacta por baixo e reaparece ao cancelar.
+    if (mostrandoQr) {
+        QrScannerRoute(
+            onLido = { payload ->
+                // O QR preenche endereço, código e ticket; o usuário só confirma.
+                address = payload.address.orEmpty()
+                code = payload.code.orEmpty()
+                raw = payloadCru(payload)
+                mostrandoQr = false
+            },
+            onCancelar = { mostrandoQr = false },
+        )
+        return
     }
 
     Box(modifier = Modifier.fillMaxSize().background(PhVoid)) {
@@ -127,6 +162,23 @@ fun PairingScreen(
 
                 item {
                     PhCard(modifier = Modifier.fillMaxWidth(), glowing = true) {
+                        PhSectionTitle(text = "ler o QR do PC")
+                        Text(
+                            text = "O jeito mais rápido: no PC, abra Dispositivos → Parear " +
+                                "novo dispositivo e aponte a câmera para o código.",
+                            color = PhTextDim,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        PhButton(
+                            text = "abrir a câmera",
+                            onClick = { mostrandoQr = true },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                }
+
+                item {
+                    PhCard(modifier = Modifier.fillMaxWidth()) {
                         PhSectionTitle(text = "dados do PC")
                         PhTextField(
                             value = address,
