@@ -1,6 +1,7 @@
 package com.pockethound.app.core.transport
 
 import com.pockethound.app.core.model.IncomingFrame
+import com.pockethound.app.core.model.PhCodec
 import com.pockethound.app.core.storage.SecureStore
 import computer.iroh.Connection
 import computer.iroh.Endpoint
@@ -290,14 +291,29 @@ class P2pTransport(
         }
     }
 
+    /**
+     * Monta o pedido do tunel para um comando.
+     *
+     * O corpo e o QUADRO INTEIRO — o mesmo JSON que o caminho direto posta em
+     * `/ph/frame` — e nao o payload solto. O desk le `body.type` e
+     * `body.payload` para saber o que fazer; mandar so o payload fazia TODO
+     * comando chegar sem tipo e cair no "comando desconhecido" do outro lado.
+     *
+     * Era esse o defeito que fazia aprovar pelo celular nao funcionar: com o
+     * transporte em P2P (fora da rede local, ou escolhido em Ajustes), o toque
+     * saia do aparelho, era entregue e descartado em silencio — e a ponte
+     * estourava o prazo como se ninguem tivesse respondido. O fluxo PC -> celular
+     * continuava funcionando porque o SSE e um GET: nao passa por aqui.
+     */
     private suspend fun pedido(call: TransportRequest): P2pRequest {
         val token = tokenProvider()
+        val quadro = json.parseToJsonElement(PhCodec.outbound(call.type, call.payload, call.session))
         return P2pRequest(
             v = PROTOCOL_VERSION,
             method = "POST",
             path = "/ph/frame",
             headers = if (token != null) mapOf("Authorization" to "Bearer " + token) else emptyMap(),
-            body = json.encodeToJsonElement(kotlinx.serialization.json.JsonObject.serializer(), call.payload),
+            body = quadro,
         )
     }
 

@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,25 +20,37 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.pockethound.app.core.model.Session
 import com.pockethound.app.core.model.TurnItem
 import com.pockethound.app.core.model.TurnItemKind
+import com.pockethound.app.core.session.PromptAck
+import com.pockethound.app.core.session.PromptStatus
+import com.pockethound.app.core.session.SessionOrder
+import com.pockethound.app.core.session.TurnStatus
 import com.pockethound.app.ui.common.PhBadge
 import com.pockethound.app.ui.common.PhButton
 import com.pockethound.app.ui.common.PhButtonVariant
@@ -57,6 +70,8 @@ import com.pockethound.app.ui.theme.PhText
 import com.pockethound.app.ui.theme.PhTextDim
 import com.pockethound.app.ui.theme.PhViolet
 import com.pockethound.app.ui.theme.PhVioletSoft
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 @Composable
 fun ChatRoute(viewModel: RootViewModel = hiltViewModel()) {
@@ -64,11 +79,14 @@ fun ChatRoute(viewModel: RootViewModel = hiltViewModel()) {
 }
 
 /**
- * Aba Chat: transcrição ao vivo, envio de prompt, cancelar turno, trocar de sessão.
+ * Aba Chat: transcricao ao vivo, envio de prompt, cancelar turno, trocar de sessao.
  *
- * TODO(pockethound): a transcrição vem do HoundRepository (dados de exemplo) e os
- * envios não saem do aparelho. Falta ligar ao transporte: prompt.send,
- * session.cancel, session.select e o consumo dos quadros turn.event.
+ * ## Como cada passo e escrito
+ *
+ * Igual ao Harness no navegador: **uma linha por passo**, com rotulo e assunto
+ * ("Comando · Check node and ignore rules"), e o corpo atras do toque. O que NAO
+ * se faz aqui e despejar o JSON dos argumentos: ele esconde justamente a frase
+ * que o modelo escreveu para ser lida.
  */
 @Composable
 fun ChatScreen(viewModel: RootViewModel) {
@@ -76,13 +94,114 @@ fun ChatScreen(viewModel: RootViewModel) {
     val activeId by viewModel.activeSessionId.collectAsStateWithLifecycle()
     val transcript by viewModel.transcript.collectAsStateWithLifecycle()
     val link by viewModel.link.collectAsStateWithLifecycle()
-    val active: Session? = sessions.firstOrNull { it.id == activeId } ?: sessions.firstOrNull()
-    val items = transcript[active?.id].orEmpty()
-    var draft by remember { mutableStateOf("") }
-    val listState = rememberLazyListState()
+    val promptStatus by viewModel.promptStatus.collectAsStateWithLifecycle()
+    val escolhaManual by viewModel.escolhaManual.collectAsStateWithLifecycle()
+    val turno by viewModel.activeTurnStatus.collectAsStateWithLifecycle()
 
-    LaunchedEffect(items.size) {
-        if (items.isNotEmpty()) listState.animateScrollToItem(items.size - 1)
+    // Mesma regra do repositorio: a escolhida, senao a mais recente em atividade.
+    val active: Session? = SessionOrder.resolve(sessions, activeId)
+    val items = transcript[active?.id].orEmpty()
+
+    // O aviso so vale para a sessao que esta na tela: o de outro destino nao e
+    // daqui e apareceria como alarme falso.
+    val aviso = promptStatus.takeIf { it.ack != PromptAck.None && it.sessionId == active?.id }
+
+    var draft by remember { mutableStateOf("") }
+    // Quais linhas estao abertas, por id de item. Vive na tela, nao no dado: o
+    // que o PC mandou nao muda quando voce toca numa linha.
+    val abertos = remember { mutableStateMapOf<String, Boolean>() }
+    val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+
+    /* ---------------------------------------------------------------- rolagem */
+
+    // A conversa NAO desce sozinha por cima de quem esta lendo mais acima — a
+    // mesma regra do Harness no navegador. Perder a linha que se estava lendo e
+    // pior do que saber da novidade um segundo depois.
+    //
+    // Quem decide e o dedo: no instante em que ele arrasta a lista, paramos de
+    // acompanhar; quando ele volta ao fim, por qualquer caminho, voltamos.
+    val seguindo = remember(listState) { mutableStateOf(true) }
+
+    /** Quantos itens ele ja tinha visto quando saiu do fim. */
+    val jaVistos = remember(listState) { mutableIntStateOf(0) }
+
+    // O laco abaixo vive fora da recomposicao: sem isto ele leria a lista do
+    // instante em que foi lancado, e nao a de agora.
+    val itensAgora by rememberUpdatedState(items)
+
+    /**
+     * Encosta a ultima mensagem no fim da tela.
+     *
+     * Alinhar o TOPO do ultimo item nao serve quando ele e maior que a tela: uma
+     * resposta ainda sendo escrita ficaria com o texto novo escondido abaixo da
+     * dobra. A sobra e exatamente o que ficou para fora; desconta-la mostra o fim
+     * de verdade, que e onde o texto novo aparece.
+     */
+    suspend fun descer(animado: Boolean) {
+        val indice = itensAgora.lastIndex
+        if (indice < 0) return
+        val info = listState.layoutInfo
+        val ultimo = info.visibleItemsInfo.lastOrNull { it.index == indice }
+        val sobra = if (ultimo == null) 0 else ultimo.size - (info.viewportEndOffset - ultimo.offset)
+        if (ultimo != null && sobra <= 0) return
+        if (animado) listState.animateScrollToItem(indice, sobra) else listState.scrollToItem(indice, sobra)
+    }
+
+    LaunchedEffect(listState) {
+        // Arrastar e o unico gesto que significa "eu escolho onde ficar". A
+        // rolagem que nos fazemos nao passa por aqui, entao nao se confunde.
+        listState.interactionSource.interactions.collect { interacao ->
+            if (interacao is DragInteraction.Start) seguindo.value = false
+        }
+    }
+
+    LaunchedEffect(listState) {
+        snapshotFlow {
+            val info = listState.layoutInfo
+            val ultimo = info.visibleItemsInfo.lastOrNull()
+            // Fim visivel = o ULTIMO item aparece inteiro. Item cortado pela borda
+            // conta como "nao estou no fim": e assim que o texto que cresce ao
+            // vivo empurra a tela, e e assim que o dedo sobe para ler.
+            val noFim = info.totalItemsCount == 0 ||
+                (ultimo != null && ultimo.index >= info.totalItemsCount - 1 &&
+                    ultimo.offset + ultimo.size <= info.viewportEndOffset)
+            Triple(noFim, itensAgora.size, listState.isScrollInProgress)
+        }.collect { (noFim, tamanho, rolando) ->
+            when {
+                noFim -> {
+                    seguindo.value = true
+                    jaVistos.intValue = tamanho
+                }
+
+                // Estava acompanhando e chegou conteudo: desce sem animacao, para
+                // nao brigar com a animacao do quadro anterior.
+                seguindo.value && !rolando && tamanho > 0 -> descer(animado = false)
+            }
+        }
+    }
+
+    // Sessao nova na tela: comeca pelo fim, acompanhando.
+    LaunchedEffect(active?.id) {
+        seguindo.value = true
+        jaVistos.intValue = items.size
+        abertos.clear()
+        if (items.isNotEmpty()) descer(animado = false)
+    }
+
+    /** Mensagens que chegaram desde que ele saiu do fim. */
+    val novas = if (seguindo.value) 0 else (items.size - jaVistos.intValue).coerceAtLeast(0)
+
+    /* ------------------------------------------------------- relogio do turno */
+
+    // O tempo so corre enquanto ha turno aberto: um relogio sempre ligado gastaria
+    // bateria para mostrar um numero parado.
+    var agora by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(turno.running) {
+        while (turno.running) {
+            agora = System.currentTimeMillis()
+            delay(1_000)
+        }
     }
 
     PhScreenScaffold(
@@ -99,7 +218,7 @@ fun ChatScreen(viewModel: RootViewModel) {
                 text = "parar",
                 onClick = { viewModel.cancelTurn() },
                 variant = PhButtonVariant.Danger,
-                enabled = items.isNotEmpty(),
+                enabled = turno.running,
                 icon = Icons.Filled.Close,
             )
         },
@@ -116,6 +235,8 @@ fun ChatScreen(viewModel: RootViewModel) {
                 onSelect = viewModel::selectSession,
             )
 
+            DestinoRow(active = active, escolhaManual = escolhaManual, total = sessions.size)
+
             if (items.isEmpty()) {
                 PhState(
                     message = "Sem transcrição ainda. Escreva o primeiro pedido abaixo.",
@@ -131,10 +252,25 @@ fun ChatScreen(viewModel: RootViewModel) {
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     items(items = items, key = { it.id }) { item ->
-                        PhMessageBubble(item = item)
+                        LinhaDaTranscricao(
+                            item = item,
+                            aberto = abertos[item.id] == true,
+                            onToggle = { abertos[item.id] = abertos[item.id] != true },
+                        )
                     }
                 }
             }
+
+            if (novas > 0) {
+                PilulaDeNovidades(novas) {
+                    seguindo.value = true
+                    scope.launch { descer(animado = true) }
+                }
+            }
+
+            FaixaDeEstado(turno = turno, agora = agora, temHistorico = items.isNotEmpty())
+
+            if (aviso != null) AvisoDePrompt(aviso)
 
             Composer(
                 value = draft,
@@ -142,6 +278,9 @@ fun ChatScreen(viewModel: RootViewModel) {
                 onSend = {
                     viewModel.sendPrompt(draft)
                     draft = ""
+                    // Quem acabou de escrever quer ver a propria mensagem: volta a
+                    // acompanhar, mesmo que estivesse lendo mais acima.
+                    seguindo.value = true
                 },
             )
         }
@@ -179,6 +318,362 @@ private fun SessionPickerRow(
     }
 }
 
+/**
+ * Diz, sem rodeios, para ONDE o proximo prompt vai.
+ *
+ * O chip destacado na faixa de cima ja mostra a escolha, mas chip destacado nao e
+ * a mesma coisa que destino declarado — e o caso que originou isto foi justamente
+ * um prompt que foi parar numa sessao que ninguem tinha escolhido.
+ *
+ * @param active sessao de destino.
+ * @param escolhaManual se o destino foi escolhido no dedo.
+ * @param total quantas sessoes existem (com uma so, nao ha o que escolher).
+ */
+@Composable
+private fun DestinoRow(active: Session?, escolhaManual: Boolean, total: Int) {
+    if (active == null) return
+    // Com uma sessao so, "escolha" nao e uma decisao — nao vale gastar tinta.
+    val automatico = !escolhaManual && total > 1
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .padding(bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        PhBadge(
+            text = "→ " + active.title.ifBlank { active.id }.take(28),
+            tone = if (automatico) PhTone.Warn else PhTone.Violet,
+            glyph = true,
+        )
+        Text(
+            text = if (automatico) "destino automático — toque num chip para fixar" else pasta(active.workspace),
+            color = PhTextDim,
+            style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+/**
+ * Avisa o que aconteceu com um prompt que o PC ja aceitou.
+ *
+ * Sem isto a tela fica muda entre "aceito" e "respondido", e mudo e
+ * indistinguivel de "o modelo esta pensando" — foi assim que um prompt aceito e
+ * nunca respondido pareceu ter sumido.
+ *
+ * @param estado retrato do prompt em voo.
+ */
+@Composable
+private fun AvisoDePrompt(estado: PromptStatus) {
+    val travado = estado.ack != PromptAck.Waiting
+    val cor = if (travado) PhDanger else PhInfo
+    val titulo = when (estado.ack) {
+        PromptAck.Stalled -> "o PC começou e parou sem responder"
+        PromptAck.Silent -> "o PC aceitou, mas não deu sinal de vida"
+        else -> "enviado — esperando o PC"
+    }
+    val detalhe = when {
+        estado.ack == PromptAck.Silent ->
+            segundos(estado.waitedMs) + " sem nenhum quadro desta sessão. Pode estar travada ou o " +
+                "turno pode estar aberto — toque em parar ou escolha outra sessão."
+
+        estado.ack == PromptAck.Stalled ->
+            segundos(estado.waitedMs) + " desde os primeiros quadros, sem nenhuma resposta. A sessão " +
+                "pode estar travada atrás de um turno aberto — toque em parar ou escolha outra sessão."
+
+        estado.queued -> "a sessão já estava ocupada: o prompt entrou na fila do próximo turno"
+
+        else -> "aguardando resposta há " + segundos(estado.waitedMs)
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .padding(bottom = 8.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(cor.copy(alpha = 0.10f))
+            .border(1.dp, cor.copy(alpha = 0.40f), RoundedCornerShape(10.dp))
+            .padding(10.dp),
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(
+                text = titulo.uppercase(),
+                color = cor,
+                style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+            )
+            Text(
+                text = detalhe,
+                color = PhTextDim,
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+            )
+        }
+    }
+}
+
+/**
+ * Faixa de estado do turno, logo acima do composer.
+ *
+ * Responde a pergunta que o usuario faz o tempo todo: "esta acontecendo alguma
+ * coisa?". Trabalhando, mostra o tempo e o passo; parado, mostra o resumo do que
+ * ja rodou. Sem numero nenhum, ela nao aparece.
+ *
+ * @param turno estado do turno da sessao na tela.
+ * @param agora relogio da tela, que corre so enquanto ha turno aberto.
+ * @param temHistorico se ja existe conversa nesta sessao.
+ */
+@Composable
+private fun FaixaDeEstado(turno: TurnStatus, agora: Long, temHistorico: Boolean) {
+    val texto = when {
+        turno.running -> {
+            val base = "trabalhando há " + cronometro(turno.decorrido(agora)) +
+                " · passo " + turno.steps
+            if (turno.queued > 0) base + " · " + turno.queued + " na fila" else base
+        }
+
+        !temHistorico -> return
+
+        turno.turns > 0 -> {
+            val base = turno.turns.toString() + (if (turno.turns == 1) " turno" else " turnos")
+            val tokens = turno.tokensIn + turno.tokensOut
+            if (tokens > 0) base + " · " + compacto(tokens) + " tokens" else base
+        }
+
+        else -> return
+    }
+    val cor = if (turno.running) PhViolet else PhTextDim
+    Text(
+        text = texto,
+        color = cor,
+        style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .padding(bottom = 6.dp),
+    )
+}
+
+/**
+ * Pílula de "chegou coisa nova", so com o usuario fora do fim.
+ *
+ * O Harness do navegador nao tem isso, mas la existem barra de rolagem e a lista
+ * de sessoes piscando. No celular, sem esta pilula, a unica pista de que chegou
+ * resposta seria o dedo do usuario. Um toque volta a acompanhar.
+ *
+ * @param novas quantas mensagens chegaram desde que ele saiu do fim.
+ * @param onClick volta para o fim e reata o acompanhamento.
+ */
+@Composable
+private fun PilulaDeNovidades(novas: Int, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .padding(bottom = 8.dp),
+        contentAlignment = Alignment.CenterEnd,
+    ) {
+        PhButton(
+            text = novas.toString() + (if (novas == 1) " nova" else " novas") + " · ir para o fim",
+            onClick = onClick,
+            variant = PhButtonVariant.Ghost,
+            icon = Icons.Filled.ArrowDownward,
+        )
+    }
+}
+
+/** "12 s" — o numero redondo basta para o humano perceber que travou. */
+private fun segundos(ms: Long): String = (ms / 1000L).toString() + " s"
+
+/** "0:42" / "12:05" — tempo de turno como se le no relogio. */
+private fun cronometro(ms: Long): String {
+    val total = (ms / 1000L).coerceAtLeast(0L)
+    val minutos = total / 60L
+    val segundos = total % 60L
+    return minutos.toString() + ":" + segundos.toString().padStart(2, '0')
+}
+
+/** "12,4k" — tokens sao muitos para caber inteiros numa linha de celular. */
+private fun compacto(valor: Long): String {
+    if (valor < 1_000L) return valor.toString()
+    val milhar = valor / 100L
+    return (milhar / 10L).toString() + "," + (milhar % 10L).toString() + "k"
+}
+
+/** Ultimo pedaco do caminho: o diretorio inteiro nao cabe nem ajuda. */
+private fun pasta(workspace: String): String =
+    workspace.trimEnd('/').substringAfterLast('/').ifBlank { workspace }
+
+/**
+ * Desenha um item da transcricao.
+ *
+ * Mensagem e balão; passo de ferramenta e raciocinio sao LINHA, no formato do
+ * Harness: rotulo, assunto e, no toque, o corpo. O corpo nunca fica aberto por
+ * padrao — uma sessao longa tem centenas de passos, e quem quer o detalhe pede.
+ *
+ * @param item item da transcricao.
+ * @param aberto se o detalhe esta aberto.
+ * @param onToggle alterna o detalhe.
+ */
+@Composable
+private fun LinhaDaTranscricao(
+    item: TurnItem,
+    aberto: Boolean,
+    onToggle: () -> Unit,
+) {
+    when (item.kind) {
+        TurnItemKind.UserMessage -> Balao(item = item, isUser = true)
+        TurnItemKind.AssistantMessage -> Balao(item = item, isUser = false)
+        TurnItemKind.Notice -> Balao(item = item, isUser = false)
+        else -> LinhaDePasso(item = item, aberto = aberto, onToggle = onToggle)
+    }
+}
+
+/** Balão de conversa (componente só do celular, DESIGN.md §6.3). */
+@Composable
+private fun Balao(item: TurnItem, isUser: Boolean) {
+    val accent = when (item.kind) {
+        TurnItemKind.UserMessage -> PhViolet
+        TurnItemKind.Notice -> PhTextDim
+        else -> PhVioletSoft
+    }
+    val label = when (item.kind) {
+        TurnItemKind.UserMessage -> "você"
+        TurnItemKind.Notice -> "aviso"
+        else -> "agente"
+    }
+
+    Box(
+        modifier = Modifier.fillMaxWidth(),
+        contentAlignment = if (isUser) Alignment.CenterEnd else Alignment.CenterStart,
+    ) {
+        Box(
+            modifier = Modifier
+                .widthIn(max = 320.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(if (isUser) PhViolet.copy(alpha = 0.10f) else PhSurface2)
+                .border(1.dp, accent.copy(alpha = 0.35f), RoundedCornerShape(12.dp))
+                .padding(12.dp),
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                Text(
+                    text = label.uppercase(),
+                    color = accent,
+                    style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                )
+                Text(
+                    text = item.text.ifBlank { "(vazio)" },
+                    color = PhText,
+                    style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Linha de um passo: rotulo, assunto e o corpo sob o toque.
+ *
+ * @param item item da transcricao.
+ * @param aberto se o corpo esta aberto.
+ * @param onToggle alterna o corpo.
+ */
+@Composable
+private fun LinhaDePasso(item: TurnItem, aberto: Boolean, onToggle: () -> Unit) {
+    val raciocinio = item.kind == TurnItemKind.Reasoning
+    val resultado = item.kind == TurnItemKind.ToolResult || item.kind == TurnItemKind.Error
+    val cor = when {
+        item.kind == TurnItemKind.Error || item.ok == false -> PhDanger
+        raciocinio -> PhInfo
+        resultado -> PhOk
+        item.kind == TurnItemKind.ToolCall -> PhAmber
+        else -> PhTextDim
+    }
+    val rotulo = when {
+        raciocinio -> "Pensou"
+        !item.label.isNullOrBlank() -> item.label
+        !item.toolName.isNullOrBlank() -> item.toolName
+        else -> "Passo"
+    }
+    // No raciocinio o assunto e a primeira frase dele; nas ferramentas e o que o
+    // proprio modelo escreveu ("description") ou o alvo da acao.
+    val assunto = if (raciocinio) primeiraLinha(item.text) else item.subject ?: primeiraLinha(item.text)
+    val corpo = if (raciocinio) item.text else item.detail
+    // O desfecho aparece mesmo fechado: e o que diz se deu certo. Aberto, o corpo
+    // completo toma o lugar dele.
+    val desfecho = if (aberto) null else item.text.takeIf { resultado }
+    val temCorpo = !corpo.isNullOrBlank()
+    val marca = if (resultado) (if (item.ok == false) "✗ " else "✓ ") else ""
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(PhSurface2.copy(alpha = 0.5f))
+            .border(1.dp, cor.copy(alpha = 0.3f), RoundedCornerShape(10.dp))
+            .clickable(enabled = temCorpo, onClick = onToggle)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                text = (marca + rotulo).uppercase(),
+                color = cor,
+                style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+            )
+            Text(
+                text = assunto.ifBlank { "(sem descrição)" },
+                color = if (raciocinio) PhTextDim else PhText,
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            if (temCorpo) {
+                Text(
+                    text = if (aberto) "▾" else "▸",
+                    color = PhTextDim,
+                    style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+                )
+            }
+        }
+
+        if (desfecho != null && desfecho.isNotBlank()) {
+            Text(
+                text = desfecho,
+                color = PhTextDim,
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+
+        if (aberto && temCorpo) {
+            Text(
+                text = corpo.orEmpty(),
+                color = PhTextDim,
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+            )
+        }
+    }
+}
+
+/** Primeira linha com conteudo — o que cabe na linha fechada. */
+private fun primeiraLinha(texto: String): String =
+    texto.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() }.orEmpty().take(90)
+
 @Composable
 private fun Composer(
     value: String,
@@ -215,58 +710,6 @@ private fun Composer(
                 variant = PhButtonVariant.Ghost,
                 enabled = false,
             )
-        }
-    }
-}
-
-/** Balão de conversa (componente só do celular, DESIGN.md §6.3). */
-@Composable
-private fun PhMessageBubble(item: TurnItem) {
-    val isUser = item.kind == TurnItemKind.UserMessage
-    val accent = when (item.kind) {
-        TurnItemKind.UserMessage -> PhViolet
-        TurnItemKind.AssistantMessage -> PhVioletSoft
-        TurnItemKind.Reasoning -> PhInfo
-        TurnItemKind.ToolCall -> PhAmber
-        TurnItemKind.ToolResult -> if (item.ok == false) PhDanger else PhOk
-        TurnItemKind.Notice -> PhTextDim
-        TurnItemKind.Error -> PhDanger
-    }
-    val label = when (item.kind) {
-        TurnItemKind.UserMessage -> "você"
-        TurnItemKind.AssistantMessage -> "agente"
-        TurnItemKind.Reasoning -> "raciocínio"
-        TurnItemKind.ToolCall -> "ferramenta · " + (item.toolName ?: "")
-        TurnItemKind.ToolResult -> "resultado · " + (item.toolName ?: "")
-        TurnItemKind.Notice -> "aviso"
-        TurnItemKind.Error -> "erro"
-    }
-
-    Box(
-        modifier = Modifier.fillMaxWidth(),
-        contentAlignment = if (isUser) Alignment.CenterEnd else Alignment.CenterStart,
-    ) {
-        Box(
-            modifier = Modifier
-                .widthIn(max = 320.dp)
-                .clip(RoundedCornerShape(12.dp))
-                .background(if (isUser) PhViolet.copy(alpha = 0.10f) else PhSurface2)
-                .border(1.dp, accent.copy(alpha = 0.35f), RoundedCornerShape(12.dp))
-                .padding(12.dp),
-        ) {
-            Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                Text(
-                    text = label.uppercase(),
-                    color = accent,
-                    style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Bold,
-                )
-                Text(
-                    text = item.text.ifBlank { "(vazio)" },
-                    color = PhText,
-                    style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
-                )
-            }
         }
     }
 }

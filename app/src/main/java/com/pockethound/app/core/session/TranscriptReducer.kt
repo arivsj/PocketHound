@@ -5,6 +5,9 @@ import com.pockethound.app.core.model.TurnItem
 import com.pockethound.app.core.model.TurnItemKind
 import com.pockethound.app.core.model.TurnKind
 
+// A regra de como uma chamada vira texto legivel mora no ToolSummary: aqui so
+// dobramos o quadro na transcricao.
+
 /**
  * Dobra um quadro do PC na transcrição de uma sessão.
  *
@@ -54,25 +57,52 @@ object TranscriptReducer {
                 timestamp = quadro.ts,
             )
 
-            TurnKind.ToolCall -> atual + TurnItem(
-                id = "c-${payload.callId ?: quadro.seq}",
-                kind = TurnItemKind.ToolCall,
-                text = payload.args?.toString().orEmpty(),
-                toolName = payload.name,
-                timestamp = quadro.ts,
-                turn = payload.turn,
-                step = payload.step,
-            )
+            // A chamada vira uma LINHA legivel, no formato do Harness: rotulo
+            // ("Comando", "Leitura") e assunto. O JSON dos argumentos vai para o
+            // detalhe, que so abre no toque — na linha ele esconderia justamente
+            // a frase que o modelo escreveu para ser lida.
+            TurnKind.ToolCall -> {
+                val linha = ToolSummary.of(payload.name.orEmpty(), payload.args)
+                atual + TurnItem(
+                    id = "c-${payload.callId ?: quadro.seq}",
+                    kind = TurnItemKind.ToolCall,
+                    text = linha.subject,
+                    label = linha.label,
+                    subject = linha.subject,
+                    detail = ToolSummary.pretty(payload.args),
+                    toolName = payload.name,
+                    callId = payload.callId,
+                    timestamp = quadro.ts,
+                    turn = payload.turn,
+                    step = payload.step,
+                )
+            }
 
-            TurnKind.ToolResult -> atual + TurnItem(
-                id = "r-${payload.callId ?: quadro.seq}",
-                kind = if (payload.isError == true) TurnItemKind.Error else TurnItemKind.ToolResult,
-                text = payload.text.orEmpty(),
-                ok = payload.isError != true,
-                timestamp = quadro.ts,
-                turn = payload.turn,
-                step = payload.step,
-            )
+            // O resultado casa com a chamada pelo callId: e o que da nome a linha
+            // ("resultado · " vazio era o que aparecia antes) e o que permite
+            // mostrar o assunto da chamada junto do desfecho.
+            TurnKind.ToolResult -> {
+                val chamada = payload.callId?.let { id ->
+                    atual.lastOrNull { it.kind == TurnItemKind.ToolCall && it.callId == id }
+                }
+                val falhou = payload.isError == true
+                atual + TurnItem(
+                    id = "r-${payload.callId ?: quadro.seq}",
+                    kind = if (falhou) TurnItemKind.Error else TurnItemKind.ToolResult,
+                    text = ToolSummary.resultSubject(payload.text.orEmpty()),
+                    detail = payload.text.orEmpty(),
+                    // Sem a chamada (resultado orfao, replay cortado) o rotulo
+                    // generico ainda e melhor que uma linha sem nome nenhum.
+                    label = chamada?.label ?: ToolSummary.label(payload.name.orEmpty()),
+                    subject = chamada?.subject,
+                    toolName = chamada?.toolName ?: payload.name,
+                    callId = payload.callId,
+                    ok = !falhou,
+                    timestamp = quadro.ts,
+                    turn = payload.turn,
+                    step = payload.step,
+                )
+            }
 
             // O turno acabou: nada pode continuar "recebendo deltas", senão o
             // cursor da tela pisca para sempre.

@@ -32,6 +32,8 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.pockethound.app.core.model.ApprovalRequest
+import com.pockethound.app.core.model.DecisaoDeAprovacao
+import com.pockethound.app.core.model.EstadoDaDecisao
 import com.pockethound.app.ui.common.PhBadge
 import com.pockethound.app.ui.common.PhBar
 import com.pockethound.app.ui.common.PhButton
@@ -44,6 +46,7 @@ import com.pockethound.app.ui.common.PhTone
 import com.pockethound.app.ui.nav.RootViewModel
 import com.pockethound.app.ui.theme.PhAmber
 import com.pockethound.app.ui.theme.PhDanger
+import com.pockethound.app.ui.theme.PhOk
 import com.pockethound.app.ui.theme.PhSurface2
 import com.pockethound.app.ui.theme.PhText
 import com.pockethound.app.ui.theme.PhTextDim
@@ -65,6 +68,7 @@ fun ApprovalsRoute(viewModel: RootViewModel = hiltViewModel()) {
 @Composable
 fun ApprovalsScreen(viewModel: RootViewModel) {
     val approvals by viewModel.approvals.collectAsStateWithLifecycle()
+    val decisoes by viewModel.decisoes.collectAsStateWithLifecycle()
     val rememberFlags = remember { mutableStateMapOf<String, Boolean>() }
     var now by remember { mutableStateOf(System.currentTimeMillis()) }
 
@@ -102,6 +106,7 @@ fun ApprovalsScreen(viewModel: RootViewModel) {
                     ApprovalCard(
                         request = request,
                         nowMs = now,
+                        decisao = decisoes[request.requestId],
                         remember = rememberFlags[request.requestId] == true,
                         onRememberChange = { checked -> rememberFlags[request.requestId] = checked },
                         onAllow = { viewModel.decide(request.requestId, true, rememberFlags[request.requestId] == true) },
@@ -117,6 +122,7 @@ fun ApprovalsScreen(viewModel: RootViewModel) {
 private fun ApprovalCard(
     request: ApprovalRequest,
     nowMs: Long,
+    decisao: DecisaoDeAprovacao?,
     remember: Boolean,
     onRememberChange: (Boolean) -> Unit,
     onAllow: () -> Unit,
@@ -203,6 +209,24 @@ private fun ApprovalCard(
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             PhButton(text = "aprovar", onClick = onAllow)
             PhButton(text = "rejeitar", onClick = onReject, variant = PhButtonVariant.Danger)
+        }
+
+        // O que aconteceu com o toque. Sem esta linha, "toquei e nada mudou" e
+        // indistinguivel de "o comando nem saiu do aparelho" — e o usuario fica
+        // tocando no escuro enquanto o pedido expira do outro lado.
+        if (decisao != null) {
+            val (cor, texto) = when (decisao.estado) {
+                EstadoDaDecisao.Enviando -> PhTextDim to "enviando ao PC…"
+                EstadoDaDecisao.Entregue -> PhOk to
+                    decisao.detalhe + " · o Harness decide e confirma em seguida"
+
+                EstadoDaDecisao.Recusada -> PhDanger to decisao.detalhe
+            }
+            Text(
+                text = texto,
+                color = cor,
+                style = MaterialTheme.typography.labelSmall,
+            )
         }
     }
 }

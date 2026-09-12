@@ -3,14 +3,18 @@ package com.pockethound.app.ui.nav
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pockethound.app.core.model.ApprovalRequest
+import com.pockethound.app.core.model.DecisaoDeAprovacao
 import com.pockethound.app.core.model.DeskState
 import com.pockethound.app.core.model.LinkState
 import com.pockethound.app.core.model.Notice
 import com.pockethound.app.core.model.Session
 import com.pockethound.app.core.model.SessionSnapshot
 import com.pockethound.app.core.model.TurnItem
+import com.pockethound.app.core.session.PromptStatus
 import com.pockethound.app.core.transport.TransportMode
 import com.pockethound.app.core.session.PairingOutcome
+import com.pockethound.app.core.session.SessionOrder
+import com.pockethound.app.core.session.TurnStatus
 import com.pockethound.app.data.repo.HoundRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
@@ -45,8 +49,25 @@ class RootViewModel @Inject constructor(
     val activeSessionId: StateFlow<String?> = repository.activeSessionId
     val transcript: StateFlow<Map<String, List<TurnItem>>> = repository.transcript
     val approvals: StateFlow<List<ApprovalRequest>> = repository.approvals
+
+    /** O que aconteceu com cada decisão enviada, por requestId. */
+    val decisoes: StateFlow<Map<String, DecisaoDeAprovacao>> = repository.decisoes
     val deskState: StateFlow<DeskState> = repository.deskState
     val notices: StateFlow<List<Notice>> = repository.notices
+
+    /** O prompt em voo deu sinal de vida? A aba Chat avisa quando nao deu. */
+    val promptStatus: StateFlow<PromptStatus> = repository.promptStatus
+
+    /** A sessao de destino foi escolhida no dedo (true) ou pelo app (false). */
+    val escolhaManual: StateFlow<Boolean> = repository.escolhaManual
+
+    /** Estado do turno por sessao: trabalhando, tempo, passos, fila, tokens. */
+    val turnStatus: StateFlow<Map<String, TurnStatus>> = repository.turnStatus
+
+    /** O turno da sessao que esta na tela — e o que o cabecalho do chat mostra. */
+    val activeTurnStatus: StateFlow<TurnStatus> = repository.turnStatus
+        .map { mapa -> mapa[repository.activeSession()?.id] ?: TurnStatus() }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), TurnStatus())
 
     val isPaired: StateFlow<Boolean> = repository.pairing
         .map { it.isPaired }
@@ -56,8 +77,9 @@ class RootViewModel @Inject constructor(
         .map { it.size }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
 
+    // Mesma regra do repositorio: a escolhida, senao a mais recente em atividade.
     val activeSession: StateFlow<Session?> = repository.sessions
-        .map { list -> list.firstOrNull { it.id == repository.activeSessionId.value } ?: list.firstOrNull() }
+        .map { list -> SessionOrder.resolve(list, repository.activeSessionId.value) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     fun selectSession(sessionId: String) = repository.selectSession(sessionId)

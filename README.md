@@ -130,13 +130,47 @@ Hilt 2.57.1 · Ktor 3.0.3 · compileSdk/targetSdk 36 · minSdk 26.
 - **Redutor da transcrição** (`core/session/TranscriptReducer.kt`): a regra que
   junta os deltas. Sem ela, uma resposta de três parágrafos viraria dezenas de
   balões de duas palavras. Função pura, testada sem tela e sem rede.
+- **Vigia do prompt** (`core/session/PromptWatchdog.kt`): o PC **aceitar** um
+  prompt não é o mesmo que **responder**. O vigia separa quadro de abertura
+  (`turn.start`, `step.start`, o eco da sua mensagem) de quadro de produção
+  (texto, raciocínio, ferramenta, fim de turno) e, passado o prazo, a aba Chat
+  diz o que aconteceu em vez de ficar muda. Prazo maior quando a sessão já estava
+  ocupada — aí a demora é a fila, não um defeito.
+- **Ordem e destino das sessões** (`core/session/SessionOrder.kt`): a lista do
+  celular seguia a ordem de chegada dos quadros, que não quer dizer nada para
+  quem olha a tela; agora quem está trabalhando vem primeiro e, dentro do grupo,
+  a que deu sinal de vida mais recente (`lastSeen`). Sem escolha do humano, o
+  destino é a mais recente **não-subagente**, e a aba Chat declara em texto para
+  onde o próximo prompt vai.
+- **Linhas de passo, como no Harness** (`core/session/ToolSummary.kt`): cada
+  chamada vira uma linha legível — rótulo e assunto ("Comando · Check node and
+  ignore rules", "Leitura · src/Main.kt") — em vez do JSON dos argumentos, que
+  esconde justamente a frase que o modelo escreveu para ser lida. O JSON vira o
+  **detalhe**, que abre no toque. O resultado casa com a chamada pelo `callId` e
+  traz o nome que antes saía vazio ("resultado · "). O raciocínio entra recolhido,
+  com a primeira frase à mostra.
+- **Estado do turno** (`core/session/TurnStatus.kt`): "trabalhando há 0:42 ·
+  passo 12 · 2 na fila" enquanto roda, e o resumo (turnos, tokens) quando para. A
+  fila vem do PC: o plugin passou a projetar `agent/inbox/spliced` e o hub publica
+  o tamanho **absoluto** da fila, para um replay não contar duas vezes.
+- **Rolagem que não sequestra** (`ui/chat/ChatScreen.kt`): a conversa só desce
+  sozinha se o usuário já estava no fim. Se ele subiu para ler, a tela fica onde
+  ele deixou e aparece uma pílula "N novas · ir para o fim" — um toque reata.
+  Mesma regra do Harness no navegador, onde nada aparece e a conversa simplesmente
+  não se mexe.
+- **Decisão de aprovação com resposta visível** (`core/model/PhModels.kt` +
+  `ui/approvals`): o cartão diz se o comando **saiu** ("enviando ao PC…", "comando
+  entregue ao PC em 120 ms"), ou por que **não saiu** (HTTP, sem contato). Sem
+  isso, "toquei e nada mudou" é indistinguível de "o comando nem saiu do aparelho".
 - **Repositório ligado** (`data/repo/HoundRepository.kt`): dobra os quadros do
-  `SessionClient` em `sessions`, `transcript`, `approvals`, `deskState` e
-  `notices`. O estado começa **vazio**, não com exemplo — dado de exemplo numa
-  tela que deveria mostrar o PC é pior que tela vazia.
-- **Testes** de JVM (**51**, todos passando): `ContractTest`, `SseDecoderTest`,
-  `TranscriptReducerTest`, `P2pFramingTest`, `FramesTest` e `PairingPayloadTest`.
-  Mais `P2pTunnelTest`, que roda **no aparelho** — ver abaixo.
+  `SessionClient` em `sessions`, `transcript`, `approvals`, `deskState`,
+  `notices` e `promptStatus`. O estado começa **vazio**, não com exemplo — dado
+  de exemplo numa tela que deveria mostrar o PC é pior que tela vazia.
+- **Testes** de JVM (**96**, todos passando): `ContractTest`, `SseDecoderTest`,
+  `TranscriptReducerTest`, `TranscriptRowsTest`, `P2pFramingTest`, `FramesTest`,
+  `PairingPayloadTest`, `QrDecodeTest`, `PromptWatchdogTest`, `SessionOrderTest`,
+  `ToolSummaryTest` e `TurnStatusTest`. Mais o `P2pTunnelTest`, que roda **no
+  aparelho** — ver abaixo.
 
 ## O teste que liga as duas pontas
 

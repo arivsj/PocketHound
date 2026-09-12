@@ -87,6 +87,10 @@ data class SessionInfo(
     val title: String = "",
     val workspace: String = "",
     val status: String = "idle",
+    /** Ultimo sinal de vida visto pelo PC (ms). Nulo no que veio so do disco. */
+    val lastSeen: Long? = null,
+    /** Quando a sessao nasceu (ms). */
+    val createdAt: Long? = null,
 )
 
 @Serializable
@@ -111,6 +115,16 @@ data class SessionUpsertPayload(
     val depth: Int? = null,
     /** Eventos no log; nulo nas sessoes que existem so no disco. */
     val events: Long? = null,
+    /**
+     * Ultimo sinal de vida visto pelo PC (ms).
+     *
+     * O plugin carimba a cada evento da sessao, entao este campo e o que ordena a
+     * lista do celular por atividade de verdade — e nao pela ordem de chegada dos
+     * quadros, que nao quer dizer nada para quem olha a tela.
+     */
+    val lastSeen: Long? = null,
+    /** Quando a sessao nasceu (ms). */
+    val createdAt: Long? = null,
 )
 
 @Serializable
@@ -154,6 +168,8 @@ data class TurnEventPayload(
     val source: String? = null,
     val plugin: String? = null,
     val todos: List<TodoItem> = emptyList(),
+    /** Mensagens esperando a vez na fila da sessão, em `inbox`. */
+    val queued: Int? = null,
 )
 
 /** Uma chamada de ferramenta embutida no fechamento do passo. */
@@ -191,6 +207,9 @@ object TurnKind {
     const val ToolResult = "tool.result"
     const val TodoWrite = "todo.write"
     const val UserMessage = "user.message"
+
+    /** Tamanho da fila da sessão mudou: é o "N na fila" que a tela mostra. */
+    const val Inbox = "inbox"
 }
 
 @Serializable

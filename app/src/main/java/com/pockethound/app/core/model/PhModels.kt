@@ -33,11 +33,22 @@ data class Session(
     val depth: Int? = null,
     /** Eventos no log; nulo nas sessões que existem só no disco. */
     val events: Long? = null,
+    /** Último sinal de vida visto pelo PC (ms); nulo no que existe só no disco. */
+    val lastSeen: Long? = null,
+    /** Quando a sessão nasceu (ms). */
+    val createdAt: Long? = null,
 ) {
     /** Subagente trabalhando em segundo plano — a tela pode agrupar à parte. */
     val isSubagent: Boolean get() = origin == "subagent"
 
-    fun toInfo(): SessionInfo = SessionInfo(id = id, title = title, workspace = workspace, status = status.wire)
+    fun toInfo(): SessionInfo = SessionInfo(
+        id = id,
+        title = title,
+        workspace = workspace,
+        status = status.wire,
+        lastSeen = lastSeen,
+        createdAt = createdAt,
+    )
 }
 
 enum class SessionStatus(val wire: String) {
@@ -65,6 +76,30 @@ data class ApprovalRequest(
     val expiresAt: Long = 0L,
 )
 
+/**
+ * O que aconteceu com uma decisão de aprovação que saiu do celular.
+ *
+ * Existe porque "toquei e não aconteceu nada" é indistinguível de "toquei e o
+ * comando nem saiu daqui". Sem separar as duas coisas, o usuário fica tocando no
+ * escuro — e quem for consertar fica adivinhando de que lado está o defeito.
+ */
+data class DecisaoDeAprovacao(
+    val estado: EstadoDaDecisao,
+    /** Explicação curta, com o código HTTP ou o motivo da falha. */
+    val detalhe: String = "",
+)
+
+enum class EstadoDaDecisao {
+    /** O comando está saindo do aparelho. */
+    Enviando,
+
+    /** Chegou ao PC. O PC ainda pode recusar por conta própria. */
+    Entregue,
+
+    /** Não saiu, ou saiu e o PC recusou na porta. */
+    Recusada,
+}
+
 /** Uma linha da transcrição de uma sessão. */
 data class TurnItem(
     val id: String,
@@ -79,6 +114,19 @@ data class TurnItem(
     val step: Int? = null,
     /** Ainda recebendo deltas. A tela usa isto para mostrar o cursor piscando. */
     val streaming: Boolean = false,
+    /**
+     * Rótulo humano da linha ("Código", "Comando", "Pensou", "Leitura").
+     *
+     * É o que o Harness escreve no navegador — e o que substitui o JSON cru de
+     * argumentos, que esconde justamente a frase que o modelo escreveu para você.
+     */
+    val label: String? = null,
+    /** Assunto de uma linha: o que a ação faz, em palavras. */
+    val subject: String? = null,
+    /** Corpo completo, para o painel que abre no toque (argumentos ou resultado). */
+    val detail: String? = null,
+    /** Chamada que originou este item — é o que casa o resultado com a chamada. */
+    val callId: String? = null,
 )
 
 enum class TurnItemKind {
