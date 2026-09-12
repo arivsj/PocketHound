@@ -1,5 +1,6 @@
 package com.pockethound.app.core.model
 
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -38,11 +39,17 @@ object FrameType {
     const val ApprovalRequest = "approval.request"
     const val ApprovalResolved = "approval.resolved"
     const val QuestionRequest = "question.request"
+
+    /** A pergunta foi respondida em outro lugar (a tela do PC). */
+    const val QuestionResolved = "question.resolved"
     const val DeskState = "desk.state"
     const val Notice = "notice"
     const val Pong = "pong"
     const val ReplayDone = "replay.done"
     const val BridgeState = "bridge.state"
+
+    /** Resposta a workspace.list: os workspaces do Harness. */
+    const val WorkspaceList = "workspace.list"
 
     // celular -> PC
     const val HelloAck = "hello.ack"
@@ -53,6 +60,9 @@ object FrameType {
     const val SessionCancel = "session.cancel"
     const val SessionSelect = "session.select"
     const val Ping = "ping"
+
+    /** Abre sessao nova dentro de um workspace. */
+    const val SessionCreate = "session.create"
 }
 
 /** Vocabulário fechado de decisão de aprovação do DSH. */
@@ -267,6 +277,15 @@ data class ReplayDonePayload(val from: Long = 0L, val to: Long = 0L)
  * Vem da ferramenta `pockethound_ask`.
  */
 @Serializable
+data class QuestionResolvedPayload(
+    val requestId: String,
+    /** Quem respondeu: desktop (a tela do PC) ou phone (o celular). */
+    @SerialName("by") val por: String = "",
+    /** A resposta, quando quem respondeu foi o celular. */
+    val answers: List<QuestionAnswerItem> = emptyList(),
+)
+
+@Serializable
 data class QuestionRequestPayload(
     val requestId: String,
     val sessionId: String = "",
@@ -315,11 +334,36 @@ data class HelloAckPayload(
 @Serializable
 data class SubscribePayload(val cursor: Long)
 
+/** Um workspace do Harness: o lugar onde uma sessao nasce. */
+@Serializable
+data class WorkspaceInfo(
+    val id: String,
+    val title: String = "",
+    val path: String = "",
+    /** Sessoes que ja vivem nele; o retrato delas chega por session.upsert. */
+    val sessions: List<String> = emptyList(),
+)
+
+@Serializable
+data class WorkspaceListPayload(val workspaces: List<WorkspaceInfo> = emptyList())
+
 @Serializable
 data class PromptSendPayload(
     val sessionId: String,
     val text: String,
     val mode: String = PromptMode.Followup,
+)
+
+/**
+ * Pedido de sessao nova num workspace.
+ *
+ * Vai workspaceId quando o app ja conhece o workspace, e path quando e um caminho
+ * novo — o PC resolve ou cria o workspace nesse caminho.
+ */
+@Serializable
+data class SessionCreatePayload(
+    val workspaceId: String? = null,
+    val path: String? = null,
 )
 
 @Serializable
@@ -360,6 +404,13 @@ sealed interface IncomingFrame {
         override val ts: Long,
         override val session: String?,
         val payload: SessionUpsertPayload,
+    ) : IncomingFrame
+
+    data class WorkspaceList(
+        override val seq: Long,
+        override val ts: Long,
+        override val session: String?,
+        val payload: WorkspaceListPayload,
     ) : IncomingFrame
 
     data class SessionGone(
@@ -409,6 +460,13 @@ sealed interface IncomingFrame {
         override val ts: Long,
         override val session: String?,
         val payload: QuestionRequestPayload,
+    ) : IncomingFrame
+
+    data class QuestionResolved(
+        override val seq: Long,
+        override val ts: Long,
+        override val session: String?,
+        val payload: QuestionResolvedPayload,
     ) : IncomingFrame
 
     data class ReplayDone(
@@ -462,6 +520,9 @@ object PhCodec {
             FrameType.SessionUpsert ->
                 IncomingFrame.SessionUpsert(seq, ts, session, payload(frame, SessionUpsertPayload.serializer()))
 
+            FrameType.WorkspaceList ->
+                IncomingFrame.WorkspaceList(seq, ts, session, payload(frame, WorkspaceListPayload.serializer()))
+
             FrameType.SessionGone ->
                 IncomingFrame.SessionGone(seq, ts, session, payload(frame, SessionGonePayload.serializer()))
 
@@ -484,6 +545,9 @@ object PhCodec {
 
             FrameType.QuestionRequest ->
                 IncomingFrame.QuestionRequest(seq, ts, session, payload(frame, QuestionRequestPayload.serializer()))
+
+            FrameType.QuestionResolved ->
+                IncomingFrame.QuestionResolved(seq, ts, session, payload(frame, QuestionResolvedPayload.serializer()))
 
             FrameType.ReplayDone ->
                 IncomingFrame.ReplayDone(seq, ts, session, payload(frame, ReplayDonePayload.serializer()))
@@ -535,6 +599,13 @@ object PhCodec {
 
     fun sessionSelect(sessionId: String): String =
         outbound(FrameType.SessionSelect, payloadOf(SessionSelectPayload(sessionId)), session = sessionId)
+
+    /** Pede ao PC a lista de workspaces do Harness. */
+    fun workspaceList(): String = outbound(FrameType.WorkspaceList, JsonObject(emptyMap()))
+
+    /** Abre sessao nova: num workspace conhecido ou num caminho. */
+    fun sessionCreate(workspaceId: String? = null, path: String? = null): String =
+        outbound(FrameType.SessionCreate, payloadOf(SessionCreatePayload(workspaceId, path)))
 
     fun ping(echo: String): String =
         outbound(FrameType.Ping, payloadOf(PingPayload(echo)))

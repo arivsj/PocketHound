@@ -15,15 +15,19 @@ import com.pockethound.app.core.model.PhCodec
 import com.pockethound.app.core.model.PromptMode
 import com.pockethound.app.core.model.PromptSendPayload
 import com.pockethound.app.core.model.QuestionAnswerItem
+import com.pockethound.app.core.model.PerguntaNaTela
+import com.pockethound.app.core.model.RespostaDaPergunta
 import com.pockethound.app.core.model.QuestionAnswerPayload
 import com.pockethound.app.core.model.Session
 import com.pockethound.app.core.model.SessionCancelPayload
+import com.pockethound.app.core.model.SessionCreatePayload
 import com.pockethound.app.core.model.SessionSelectPayload
 import com.pockethound.app.core.model.SessionSnapshot
 import com.pockethound.app.core.model.SessionStatus
 import com.pockethound.app.core.model.SessionUpsertPayload
 import com.pockethound.app.core.model.TurnItem
 import com.pockethound.app.core.model.TurnItemKind
+import com.pockethound.app.core.model.Workspace
 import com.pockethound.app.core.session.ConnectionStatus
 import com.pockethound.app.core.session.PromptAck
 import com.pockethound.app.core.session.PromptStatus
@@ -83,6 +87,40 @@ class HoundRepository @Inject constructor(
 
     private val _approvals = MutableStateFlow<List<ApprovalRequest>>(emptyList())
     val approvals: StateFlow<List<ApprovalRequest>> = _approvals.asStateFlow()
+
+    /**
+     * Workspaces do Harness — a resposta de `GET /workspaces` da ponte.
+     *
+     * Sem eles o celular so conversa com sessoes que ja existem; com eles escolhe
+     * ONDE trabalhar e abre sessao nova la, que e a ideia central do app na rua.
+     */
+    private val _workspaces = MutableStateFlow<List<Workspace>>(emptyList())
+    val workspaces: StateFlow<List<Workspace>> = _workspaces.asStateFlow()
+
+    /**
+     * Perguntas do agente esperando resposta do celular.
+     *
+     * A ferramenta de pergunta do Harness chama o provedor da UI web direto, sem
+     * gancho; o plugin passou a ENVOLVER esse provedor e a perguntar aqui tambem.
+     * Quem responde primeiro vale — e por isso a pergunta precisa de tela, nao so
+     * de um aviso.
+     */
+    private val _perguntas = MutableStateFlow<List<PerguntaNaTela>>(emptyList())
+    val perguntas: StateFlow<List<PerguntaNaTela>> = _perguntas.asStateFlow()
+
+    /** O que houve com o ultimo pedido de sessao nova, para a tela contar. */
+    private val _criandoSessao = MutableStateFlow<String?>(null)
+    val criandoSessao: StateFlow<String?> = _criandoSessao.asStateFlow()
+
+    /**
+     * O que houve com o ultimo pedido de workspaces.
+     *
+     * Existe porque "a lista nao chegou" tem duas causas bem diferentes — o
+     * pedido nao saiu do aparelho, ou saiu e a resposta nao voltou — e sem esta
+     * linha as duas ficam identicas na tela.
+     */
+    private val _recadoWorkspaces = MutableStateFlow<String?>(null)
+    val recadoWorkspaces: StateFlow<String?> = _recadoWorkspaces.asStateFlow()
 
     /**
      * O que aconteceu com cada decisão que saiu daqui, por requestId.
@@ -226,6 +264,19 @@ class HoundRepository @Inject constructor(
                 _decisoes.update { atual -> atual - quadro.payload.requestId }
             }
 
+            is IncomingFrame.WorkspaceList -> {
+                _workspaces.value = quadro.payload.workspaces.map { info ->
+                    Workspace(id = info.id, title = info.title, path = info.path, sessions = info.sessions)
+                }
+                _recadoWorkspaces.value = _workspaces.value.size.toString() + " workspace(s) recebidos do Harness"
+            }
+
+            is IncomingFrame.ReplayDone -> {
+                // O fluxo terminou de sincronizar: e a hora de pedir o que so o PC
+                // sabe — a lista de workspaces, que da o "onde trabalhar".
+                pedirWorkspaces()
+            }
+
             is IncomingFrame.DeskState -> {
                 _deskState.value = DeskState.fromPayload(quadro.payload)
             }
@@ -239,12 +290,30 @@ class HoundRepository @Inject constructor(
             }
 
             is IncomingFrame.QuestionRequest -> {
-                val primeira = quadro.payload.questions.firstOrNull()
-                avisar(
-                    NoticeLevel.Info,
-                    primeira?.header ?: "Pergunta do agente",
-                    primeira?.question.orEmpty(),
-                )
+                val pedido = quadro.payload
+                _perguntas.update { atual ->
+                    atual.filterNot { it.pedido.requestId == pedido.requestId } +
+                        PerguntaNaTela(pedido = pedido)
+                }
+            }
+
+            is IncomingFrame.QuestionResolved -> {
+                // Respondida — na tela do PC ou aqui. A pergunta FICA na lista, com
+                // a resposta a mostra: sumir esconderia o que foi combinado, e
+                // deixar respondivel fazia responder a mesma coisa varias vezes.
+                val resolucao = quadro.payload
+                _perguntas.update { atual ->
+                    atual.map { item ->
+                        if (item.pedido.requestId != resolucao.requestId) item
+                        else item.copy(
+                            resposta = item.resposta ?: RespostaDaPergunta(
+                                selecionadas = resolucao.answers.flatMap { it.selected },
+                                textoLivre = resolucao.answers.firstNotNullOfOrNull { it.custom },
+                                por = resolucao.por,
+                            ),
+                        )
+                    }
+                }
             }
 
             else -> Unit
@@ -285,6 +354,18 @@ class HoundRepository @Inject constructor(
      */
     fun selectSession(sessionId: String) {
         _escolhaManual.value = true
+
+        // Sessão que o app ainda não conhece — uma conversa fria escolhida na lista
+        // de workspaces — entra como retrato mínimo. Sem isto o destino não
+        // resolvia (SessionOrder.resolve cai no padrão), a escolha se perdia e
+        // parecia que o toque não fazia nada. Quando o PC resumir a sessão, o
+        // session.upsert traz o título de verdade e substitui este retrato.
+        if (_sessions.value.none { it.id == sessionId }) {
+            _sessions.value = SessionOrder.order(
+                _sessions.value + Session(id = sessionId, title = "", status = SessionStatus.Idle),
+            )
+        }
+
         _activeSessionId.value = sessionId
         scope.launch {
             sessionClient.send(
@@ -341,6 +422,46 @@ class HoundRepository @Inject constructor(
 
                 is TransportResult.NetworkError ->
                     avisar(NoticeLevel.Warn, "Sem contato com o PC", "O prompt não foi entregue.")
+            }
+        }
+    }
+
+    /** Pede ao PC a lista de workspaces do Harness. */
+    fun pedirWorkspaces() {
+        _recadoWorkspaces.value = "pedindo ao PC…"
+        scope.launch {
+            val envio = sessionClient.send(FrameType.WorkspaceList, kotlinx.serialization.json.JsonObject(emptyMap()))
+            _recadoWorkspaces.value = when (envio) {
+                is TransportResult.Ok ->
+                    "comando entregue ao PC em " + envio.latencyMs + " ms · resposta: " +
+                        envio.raw.orEmpty().take(80)
+
+                is TransportResult.HttpError -> "o PC recusou: HTTP " + envio.code + " — " + envio.message.take(90)
+                is TransportResult.NetworkError ->
+                    "não saiu do aparelho: " + (envio.cause.message ?: envio.cause::class.simpleName.orEmpty())
+            }
+        }
+    }
+
+    /**
+     * Abre uma sessao nova — num workspace conhecido ou num caminho novo.
+     *
+     * Sessao nao muda de pasta: e assim que se "muda de workspace". Quem confirma
+     * que deu certo e o quadro `session.upsert` que o PC publica em seguida; aqui
+     * so contamos o que houve com o envio.
+     */
+    fun criarSessao(workspaceId: String? = null, path: String? = null) {
+        _criandoSessao.value = "abrindo sessão…"
+        scope.launch {
+            val envio = sessionClient.send(
+                FrameType.SessionCreate,
+                PhCodec.payloadOf(SessionCreatePayload(workspaceId = workspaceId, path = path)),
+            )
+            _criandoSessao.value = when (envio) {
+                is TransportResult.Ok -> null
+                is TransportResult.HttpError -> "o PC recusou: HTTP " + envio.code
+                is TransportResult.NetworkError ->
+                    "não saiu do aparelho: " + (envio.cause.message ?: "sem contato")
             }
         }
     }
@@ -403,14 +524,52 @@ class HoundRepository @Inject constructor(
         }
     }
 
-    fun answerQuestion(requestId: String, questionId: String, selected: List<String>) {
+    /**
+     * Responde uma pergunta do agente.
+     *
+     * A fila NAO e esvaziada aqui: quem esvazia e o quadro question.resolved, que
+     * pode vir do proprio PC quando a resposta foi dada la. Tirar da tela antes
+     * esconderia uma resposta que nao chegou.
+     *
+     * @param requestId pergunta alvo.
+     * @param questionId qual das perguntas do cartao.
+     * @param selecionadas opcoes marcadas.
+     * @param textoLivre resposta escrita a mao, quando houver.
+     */
+    fun answerQuestion(
+        requestId: String,
+        questionId: String,
+        selected: List<String>,
+        textoLivre: String? = null,
+    ) {
+        // Trava o cartao NA HORA do toque. Quem confirma e o quadro
+        // question.resolved, mas depender so dele deixava o cartao respondivel
+        // durante a ida e a volta — e a mesma pergunta era respondida varias vezes.
+        _perguntas.update { atual ->
+            atual.map { item ->
+                if (item.pedido.requestId != requestId) item
+                else item.copy(
+                    resposta = RespostaDaPergunta(
+                        selecionadas = selected,
+                        textoLivre = textoLivre,
+                        por = "celular",
+                    ),
+                )
+            }
+        }
         scope.launch {
-            sessionClient.send(
+            val envio = sessionClient.send(
                 FrameType.QuestionAnswer,
                 PhCodec.payloadOf(
-                    QuestionAnswerPayload(requestId, listOf(QuestionAnswerItem(questionId, selected))),
+                    QuestionAnswerPayload(
+                        requestId = requestId,
+                        answers = listOf(QuestionAnswerItem(questionId, selected, textoLivre)),
+                    ),
                 ),
             )
+            if (envio !is TransportResult.Ok) {
+                avisar(NoticeLevel.Error, "A resposta não chegou ao PC", "A pergunta continua aberta.")
+            }
         }
     }
 

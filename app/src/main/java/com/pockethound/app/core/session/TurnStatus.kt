@@ -63,7 +63,23 @@ object TurnStatusReducer {
                 turns = maxOf(atual.turns, payload.turn ?: 0),
             )
 
-            TurnKind.StepStart -> atual.copy(steps = maxOf(atual.steps, payload.step ?: 0))
+            // Qualquer sinal de trabalho DENTRO de um turno prova que ele esta
+            // aberto — inclusive quando o quadro de abertura se perdeu no replay
+            // ou foi descartado na contrapressao. Sem isto o relogio e o "passo N"
+            // ficavam velhos com o agente trabalhando, que e a pior hora para a
+            // tela mentir.
+            TurnKind.StepStart -> atual.copy(
+                steps = maxOf(atual.steps, payload.step ?: 0),
+                running = true,
+                turn = payload.turn ?: atual.turn,
+                startedAt = if (atual.running) atual.startedAt else quadro.ts,
+            )
+
+            TurnKind.TextDelta, TurnKind.ReasoningDelta, TurnKind.ToolCall -> atual.copy(
+                running = true,
+                turn = payload.turn ?: atual.turn,
+                startedAt = if (atual.running) atual.startedAt else quadro.ts,
+            )
 
             // O turno fechou: o agente nao esta mais trabalhando NESTA sessao. Sem
             // isto a tela ficaria girando para sempre quando o passo morresse sem

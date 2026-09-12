@@ -35,7 +35,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Forum
-import androidx.compose.material.icons.filled.HowToReg
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -77,7 +77,8 @@ data class PhNavItem(
 /** As 4 abas do DESIGN.md §7.2, na ordem. */
 val phNavItems: List<PhNavItem> = listOf(
     PhNavItem(PhTab.Chat.route, PhTab.Chat.label, Icons.Filled.Forum),
-    PhNavItem(PhTab.Approvals.route, PhTab.Approvals.label, Icons.Filled.HowToReg),
+    // A aba de aprovar virou Sessões: o cartão foi para dentro do chat.
+    PhNavItem(PhTab.Sessions.route, PhTab.Sessions.label, Icons.Filled.FolderOpen),
     PhNavItem(PhTab.Fleet.route, PhTab.Fleet.label, Icons.Filled.Dns),
     PhNavItem(PhTab.Settings.route, PhTab.Settings.label, Icons.Filled.Settings),
 )
@@ -156,7 +157,7 @@ fun PhBottomBar(
                     BarItem(
                         item = item,
                         selected = item.route == selectedRoute,
-                        badge = if (item.route == PhTab.Approvals.route) approvalCount else 0,
+                        badge = if (item.route == PhTab.Chat.route) approvalCount else 0,
                         onClick = { onSelect(item.route) },
                         modifier = Modifier.weight(1f),
                     )

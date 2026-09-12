@@ -7,9 +7,11 @@ import com.pockethound.app.core.model.DecisaoDeAprovacao
 import com.pockethound.app.core.model.DeskState
 import com.pockethound.app.core.model.LinkState
 import com.pockethound.app.core.model.Notice
+import com.pockethound.app.core.model.PerguntaNaTela
 import com.pockethound.app.core.model.Session
 import com.pockethound.app.core.model.SessionSnapshot
 import com.pockethound.app.core.model.TurnItem
+import com.pockethound.app.core.model.Workspace
 import com.pockethound.app.core.session.PromptStatus
 import com.pockethound.app.core.transport.TransportMode
 import com.pockethound.app.core.session.PairingOutcome
@@ -52,6 +54,25 @@ class RootViewModel @Inject constructor(
 
     /** O que aconteceu com cada decisão enviada, por requestId. */
     val decisoes: StateFlow<Map<String, DecisaoDeAprovacao>> = repository.decisoes
+
+    /** Workspaces do Harness: onde uma sessão pode nascer. */
+    val workspaces: StateFlow<List<Workspace>> = repository.workspaces
+
+    /** Recado do último pedido de sessão nova, quando houve problema. */
+    val criandoSessao: StateFlow<String?> = repository.criandoSessao
+
+    /** O que houve com o último pedido de workspaces. */
+    val recadoWorkspaces: StateFlow<String?> = repository.recadoWorkspaces
+
+    /** Perguntas do agente esperando resposta do celular. */
+    val perguntas: StateFlow<List<PerguntaNaTela>> = repository.perguntas
+
+    fun responderPergunta(requestId: String, questionId: String, selecionadas: List<String>, textoLivre: String?) =
+        repository.answerQuestion(requestId, questionId, selecionadas, textoLivre)
+
+    fun pedirWorkspaces() = repository.pedirWorkspaces()
+
+    fun criarSessao(workspaceId: String) = repository.criarSessao(workspaceId = workspaceId)
     val deskState: StateFlow<DeskState> = repository.deskState
     val notices: StateFlow<List<Notice>> = repository.notices
 

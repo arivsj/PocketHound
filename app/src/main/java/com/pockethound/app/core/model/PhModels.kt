@@ -65,6 +65,23 @@ enum class SessionStatus(val wire: String) {
     }
 }
 
+/**
+ * Um workspace do Harness, como a tela mostra.
+ *
+ * É o lugar onde uma sessão nasce. Sessão não muda de pasta — mudar de workspace
+ * é abrir sessão nova lá dentro, e é isso que a aba de sessões faz.
+ */
+data class Workspace(
+    val id: String,
+    val title: String = "",
+    val path: String = "",
+    /** Sessões que já vivem nele; o retrato delas chega por session.upsert. */
+    val sessions: List<String> = emptyList(),
+) {
+    /** Último pedaço do caminho — o diretório inteiro não cabe numa linha. */
+    val pasta: String get() = path.trimEnd('/').substringAfterLast('/').ifBlank { path }
+}
+
 /** Aprovação pendente na fila do celular. */
 data class ApprovalRequest(
     val requestId: String,
@@ -74,6 +91,28 @@ data class ApprovalRequest(
     val argsPreview: String = "",
     val sessionId: String? = null,
     val expiresAt: Long = 0L,
+)
+
+/**
+ * Uma pergunta do agente na tela, com o que já se sabe sobre ela.
+ *
+ * A pergunta NÃO sai da tela quando é respondida: ela fica salva, com a resposta
+ * à mostra e os botões travados. Sumir esconderia o que foi combinado — e deixar
+ * respondível fazia a mesma pergunta ser respondida várias vezes.
+ */
+data class PerguntaNaTela(
+    val pedido: com.pockethound.app.core.model.QuestionRequestPayload,
+    val resposta: RespostaDaPergunta? = null,
+) {
+    val respondida: Boolean get() = resposta != null
+}
+
+/** O que foi respondido, e por quem. */
+data class RespostaDaPergunta(
+    val selecionadas: List<String> = emptyList(),
+    val textoLivre: String? = null,
+    /** `celular` ou `desktop` — a resposta pode ter vindo da tela do PC. */
+    val por: String = "celular",
 )
 
 /**
@@ -215,7 +254,13 @@ enum class LinkStatus {
 /** Rótulos das 4 abas da barra inferior (DESIGN.md §7.2). */
 enum class PhTab(val route: String, val label: String) {
     Chat("chat", "Chat"),
-    Approvals("approvals", "Aprovar"),
+
+    /**
+     * A aba de aprovar virou Sessões: o cartão de aprovação passou a aparecer no
+     * próprio chat, junto do que está sendo decidido, e o lugar dele na barra
+     * ficou para escolher ONDE trabalhar — workspace e sessão.
+     */
+    Sessions("sessions", "Sessões"),
     Fleet("fleet", "Frota"),
     Settings("settings", "Ajustes"),
 }

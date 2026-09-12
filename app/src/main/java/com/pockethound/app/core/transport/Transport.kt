@@ -203,14 +203,34 @@ class TransportSelector @Inject constructor(
     private val json: Json,
 ) {
     /**
+     * A escolha vale por um minuto.
+     *
+     * Sondar a rede a cada comando custa caro e, pior, faz o app parecer quebrado:
+     * um POST que deveria sair em 150 ms esperava a sonda do caminho direto (1,5 s)
+     * ou, quando ela falhava, a do túnel (ate 15 s). Com o fluxo vivo, o caminho
+     * ja esta provado — nao ha o que sondar de novo a cada tecla.
+     */
+    private var cache: Pair<SelectedTransport, Long>? = null
+
+    /** Esquece a escolha; o proximo envio sonda de novo. */
+    fun invalidar() {
+        cache = null
+    }
+
+    /**
      * @param client cliente Ktor já montado.
      * @param tokenProvider token do dispositivo.
+     * @param forceRefresh sonda de novo mesmo com a escolha ainda valida.
      */
     suspend fun select(
         client: HttpClient,
         tokenProvider: suspend () -> String?,
         forceRefresh: Boolean = false,
     ): SelectedTransport {
+        val agora = System.currentTimeMillis()
+        cache?.let { (escolhido, quando) ->
+            if (!forceRefresh && agora - quando < VALIDADE_MS) return escolhido
+        }
         val sessao = settingsStorage.read()
         val direto = DirectTransport(sessao.directBaseUrl, tokenProvider, client)
         // O ticket e lido na hora, nao capturado: o pareamento pode acontecer
@@ -222,7 +242,7 @@ class TransportSelector @Inject constructor(
             json = json,
         )
 
-        return when (sessao.transportMode) {
+        val escolhido = when (sessao.transportMode) {
             TransportMode.DIRECT_ONLY -> SelectedTransport(sessao.transportMode, direto, direto.probe())
 
             TransportMode.P2P_ONLY -> SelectedTransport(sessao.transportMode, p2p, p2p.probe())
@@ -236,5 +256,12 @@ class TransportSelector @Inject constructor(
                 }
             }
         }
+        cache = escolhido to agora
+        return escolhido
+    }
+
+    companion object {
+        /** Por quanto tempo a escolha do caminho vale, em ms. */
+        const val VALIDADE_MS = 60_000L
     }
 }

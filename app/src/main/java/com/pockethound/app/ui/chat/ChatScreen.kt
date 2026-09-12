@@ -51,7 +51,9 @@ import com.pockethound.app.core.session.PromptAck
 import com.pockethound.app.core.session.PromptStatus
 import com.pockethound.app.core.session.SessionOrder
 import com.pockethound.app.core.session.TurnStatus
+import com.pockethound.app.ui.approvals.CartaoDeAprovacao
 import com.pockethound.app.ui.common.PhBadge
+import com.pockethound.app.ui.questions.CartaoDePergunta
 import com.pockethound.app.ui.common.PhButton
 import com.pockethound.app.ui.common.PhButtonVariant
 import com.pockethound.app.ui.common.PhScreenScaffold
@@ -97,6 +99,9 @@ fun ChatScreen(viewModel: RootViewModel) {
     val promptStatus by viewModel.promptStatus.collectAsStateWithLifecycle()
     val escolhaManual by viewModel.escolhaManual.collectAsStateWithLifecycle()
     val turno by viewModel.activeTurnStatus.collectAsStateWithLifecycle()
+    val approvals by viewModel.approvals.collectAsStateWithLifecycle()
+    val decisoes by viewModel.decisoes.collectAsStateWithLifecycle()
+    val perguntas by viewModel.perguntas.collectAsStateWithLifecycle()
 
     // Mesma regra do repositorio: a escolhida, senao a mais recente em atividade.
     val active: Session? = SessionOrder.resolve(sessions, activeId)
@@ -110,6 +115,9 @@ fun ChatScreen(viewModel: RootViewModel) {
     // Quais linhas estao abertas, por id de item. Vive na tela, nao no dado: o
     // que o PC mandou nao muda quando voce toca numa linha.
     val abertos = remember { mutableStateMapOf<String, Boolean>() }
+
+    // "Nao perguntar de novo" por pedido — vive na tela, como o que esta aberto.
+    val lembretes = remember { mutableStateMapOf<String, Boolean>() }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
 
@@ -130,6 +138,11 @@ fun ChatScreen(viewModel: RootViewModel) {
     // instante em que foi lancado, e nao a de agora.
     val itensAgora by rememberUpdatedState(items)
 
+    // As aprovacoes entram no FIM da mesma lista do chat, entao elas contam para a
+    // rolagem: sem isto o cartao chegaria escondido abaixo da dobra.
+    val aprovacoesAgora by rememberUpdatedState(approvals)
+    val perguntasAgora by rememberUpdatedState(perguntas)
+
     /**
      * Encosta a ultima mensagem no fim da tela.
      *
@@ -139,8 +152,10 @@ fun ChatScreen(viewModel: RootViewModel) {
      * de verdade, que e onde o texto novo aparece.
      */
     suspend fun descer(animado: Boolean) {
-        val indice = itensAgora.lastIndex
-        if (indice < 0) return
+        // O ultimo item DA LISTA, nao o ultimo da transcricao: as aprovacoes
+        // pendentes ficam depois dela.
+        val indice = (listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)
+        if (indice < 0 || listState.layoutInfo.totalItemsCount == 0) return
         val info = listState.layoutInfo
         val ultimo = info.visibleItemsInfo.lastOrNull { it.index == indice }
         val sobra = if (ultimo == null) 0 else ultimo.size - (info.viewportEndOffset - ultimo.offset)
@@ -166,7 +181,13 @@ fun ChatScreen(viewModel: RootViewModel) {
             val noFim = info.totalItemsCount == 0 ||
                 (ultimo != null && ultimo.index >= info.totalItemsCount - 1 &&
                     ultimo.offset + ultimo.size <= info.viewportEndOffset)
-            Triple(noFim, itensAgora.size, listState.isScrollInProgress)
+            // As aprovacoes contam como conteudo novo: o cartao tem de aparecer,
+            // nao chegar escondido abaixo da dobra.
+            Triple(
+                noFim,
+                itensAgora.size + aprovacoesAgora.size + perguntasAgora.size,
+                listState.isScrollInProgress,
+            )
         }.collect { (noFim, tamanho, rolando) ->
             when {
                 noFim -> {
@@ -256,6 +277,43 @@ fun ChatScreen(viewModel: RootViewModel) {
                             item = item,
                             aberto = abertos[item.id] == true,
                             onToggle = { abertos[item.id] = abertos[item.id] != true },
+                        )
+                    }
+
+                    // A APROVACAO MORA AQUI. Ela nasceu numa aba propria e mudou de
+                    // lugar por um motivo pratico: decide-se melhor com a linha que
+                    // pediu a permissao na frente, sem trocar de tela no meio do
+                    // trabalho. A aba que ela ocupava virou a escolha de workspace.
+                    items(items = approvals, key = { "aprovacao-" + it.requestId }) { pedido ->
+                        CartaoDeAprovacao(
+                            request = pedido,
+                            nowMs = agora,
+                            decisao = decisoes[pedido.requestId],
+                            remember = lembretes[pedido.requestId] == true,
+                            onRememberChange = { marcado -> lembretes[pedido.requestId] = marcado },
+                            onAllow = {
+                                viewModel.decide(pedido.requestId, true, lembretes[pedido.requestId] == true)
+                            },
+                            onReject = { viewModel.decide(pedido.requestId, false, false) },
+                        )
+                    }
+
+                    // E a pergunta do agente, pelo mesmo motivo: ela chega nos dois
+                    // lugares ao mesmo tempo e quem responder primeiro vale. Sem o
+                    // cartão aqui, a pergunta virava um aviso sem onde responder.
+                    items(items = perguntas, key = { "pergunta-" + it.pedido.requestId }) { item ->
+                        CartaoDePergunta(
+                            pedido = item.pedido,
+                            resposta = item.resposta,
+                            nowMs = agora,
+                            onResponder = { questionId, selecionadas, textoLivre ->
+                                viewModel.responderPergunta(
+                                    requestId = item.pedido.requestId,
+                                    questionId = questionId,
+                                    selecionadas = selecionadas,
+                                    textoLivre = textoLivre,
+                                )
+                            },
                         )
                     }
                 }

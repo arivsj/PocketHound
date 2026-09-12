@@ -21,21 +21,23 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
-import com.pockethound.app.ui.approvals.ApprovalsRoute
 import com.pockethound.app.ui.chat.ChatRoute
 import com.pockethound.app.ui.fleet.FleetRoute
 import com.pockethound.app.ui.pairing.PairingRoute
 import com.pockethound.app.ui.settings.SettingsRoute
 import com.pockethound.app.ui.theme.PhBg
+import com.pockethound.app.ui.workspaces.WorkspacesRoute
 
 object Routes {
     const val Pairing = "pairing"
     const val Chat = "chat"
-    const val Approvals = "approvals"
+
+    /** Onde a decisão de aprovação mora agora: dentro do chat. */
+    const val Sessions = "sessions"
     const val Fleet = "fleet"
     const val Settings = "settings"
 
-    val tabs = listOf(Chat, Approvals, Fleet, Settings)
+    val tabs = listOf(Chat, Sessions, Fleet, Settings)
 }
 
 private fun NavHostController.goSingleTop(route: String) {
@@ -119,7 +121,9 @@ fun PhNavRoot(viewModel: RootViewModel = hiltViewModel()) {
                 )
             }
             composable(Routes.Chat) { ChatRoute() }
-            composable(Routes.Approvals) { ApprovalsRoute() }
+            composable(Routes.Sessions) {
+                WorkspacesRoute(onIrParaChat = { navController.goSingleTop(Routes.Chat) })
+            }
             composable(Routes.Fleet) { FleetRoute() }
             composable(Routes.Settings) {
                 SettingsRoute(onUnpaired = { navController.goSingleTop(Routes.Pairing) })

@@ -1,7 +1,9 @@
 package com.pockethound.app.core.session
 
+import com.pockethound.app.core.model.FrameType
 import com.pockethound.app.core.model.IncomingFrame
 import com.pockethound.app.core.model.PhCodec
+import com.pockethound.app.core.model.PingPayload
 import com.pockethound.app.core.storage.SecureStore
 import com.pockethound.app.core.storage.SettingsStorage
 import com.pockethound.app.core.transport.SelectedTransport
@@ -13,6 +15,7 @@ import io.ktor.client.HttpClient
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -21,6 +24,8 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlin.time.Duration.Companion.milliseconds
+import kotlinx.coroutines.flow.timeout
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonObject
@@ -109,7 +114,10 @@ class SessionClient @Inject constructor(
                 continue
             }
 
-            val selecionado: SelectedTransport = selector.select(client, ::token)
+            // forceRefresh na segunda tentativa em diante: se o fluxo caiu, o
+            // caminho que estava valendo deixou de ser confiavel.
+            val selecionado: SelectedTransport =
+                selector.select(client, ::token, forceRefresh = atraso > ATRASO_MINIMO_MS)
             _state.value = _state.value.copy(
                 path = selecionado.health.path,
                 endpoint = selecionado.health.endpoint,
@@ -127,8 +135,31 @@ class SessionClient @Inject constructor(
             atraso = ATRASO_MINIMO_MS
             _state.value = _state.value.copy(status = ConnectionStatus.Online, reason = null)
 
+            // Ping de vida enquanto o fluxo estiver aberto.
+            //
+            // Serve a dois propositos: o desk fica sabendo que este aparelho esta
+            // vivo (e pode largar conexoes velhas com seguranca), e o pong que
+            // volta mantem o fluxo com sinal mesmo quando a sessao esta parada.
+            coroutineScope {
+            val batimento = launch {
+                while (isActive) {
+                    delay(PING_MS)
+                    selecionado.transport.request(
+                        TransportRequest(FrameType.Ping, PhCodec.payloadOf(PingPayload(echo = "vivo"))),
+                    )
+                }
+            }
+
             try {
-                selecionado.transport.events(_state.value.cursor).collect { quadro ->
+                selecionado.transport
+                    .events(_state.value.cursor)
+                    // SEM SINAL por muito tempo = conexao morta. Rede movel troca de
+                    // torre, NAT expira, o socket vira zumbi — e sem esta linha o app
+                    // fica pendurado esperando bytes que nunca vem, com "ao vivo" na
+                    // tela. O PC manda um batimento a cada 15 s, entao 45 s de
+                    // silencio e definitivo. Antes disso, so reiniciar o app resolvia.
+                    .timeout(SILENCIO_MAXIMO_MS.milliseconds)
+                    .collect { quadro ->
                     // `seq == 0` é quadro efêmero do PC (estado da máquina, aviso):
                     // não faz parte da linha do tempo e NÃO pode avançar o cursor,
                     // senão o replay pediria um buraco que não existe.
@@ -143,6 +174,12 @@ class SessionClient @Inject constructor(
                     status = ConnectionStatus.Reconectando,
                     reason = erro::class.simpleName,
                 )
+            } finally {
+                // Fecha o batimento JUNTO com o fluxo: sem isto, um laco de
+                // reconexao deixaria um ping por tentativa, e o desk veria um
+                // aparelho falante e nenhuma conexao.
+                batimento.cancel()
+            }
             }
             delay(ATRASO_MINIMO_MS)
         }
@@ -157,15 +194,31 @@ class SessionClient @Inject constructor(
      * @return o resultado da entrega.
      */
     suspend fun send(type: String, payload: JsonObject, session: String? = null): TransportResult {
+        // Sem sonda: com o fluxo vivo, o caminho ja esta provado (a escolha fica
+        // cacheada por um minuto). So quando o envio falha e que vale sondar tudo
+        // de novo — e ai a proxima chamada paga a sonda uma vez, nao a cada tecla.
         val selecionado = selector.select(client, ::token)
         if (!selecionado.health.reachable) {
+            selector.invalidar()
             return TransportResult.NetworkError(IllegalStateException("PC inalcançável"))
         }
-        return selecionado.transport.request(TransportRequest(type, payload, session))
+        val resultado = selecionado.transport.request(TransportRequest(type, payload, session))
+        if (resultado is TransportResult.NetworkError) selector.invalidar()
+        return resultado
     }
 
     companion object {
         const val ATRASO_MINIMO_MS = 1000L
         const val ATRASO_MAXIMO_MS = 15000L
+
+        /**
+         * Quanto tempo de silencio no fluxo significa conexao morta.
+         *
+         * O PC manda batimento a cada 15 s; tres batimentos perdidos e definitivo.
+         */
+        const val SILENCIO_MAXIMO_MS = 45_000L
+
+        /** De quanto em quanto o app avisa que esta vivo. */
+        const val PING_MS = 25_000L
     }
 }
