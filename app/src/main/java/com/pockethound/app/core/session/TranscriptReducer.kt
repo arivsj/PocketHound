@@ -40,6 +40,15 @@ import com.pockethound.app.core.model.TurnKind
  */
 object TranscriptReducer {
 
+    /**
+     * Prefixo dos itens que nascem no celular antes do eco do PC.
+     *
+     * O eco existe para a mensagem aparecer no instante do toque, sem esperar a
+     * ida e volta; ele é substituído pelo item do PC quando o `user.message`
+     * chega (ver `tirarEcoLocal`).
+     */
+    const val ECO_LOCAL = "local-"
+
     fun reduce(atual: List<TurnItem>, quadro: IncomingFrame): List<TurnItem> {
         if (quadro !is IncomingFrame.TurnEvent) return atual
         val payload = quadro.payload
@@ -57,15 +66,20 @@ object TranscriptReducer {
                 contexto = payload.reasoning?.takeIf { it.isNotBlank() },
             )
 
-            TurnKind.UserMessage -> juntar(
-                atual,
-                TurnItem(
+            TurnKind.UserMessage -> {
+                val novo = TurnItem(
                     id = "u-${quadro.seq}",
                     kind = TurnItemKind.UserMessage,
                     text = payload.text.orEmpty(),
                     timestamp = quadro.ts,
-                ),
-            )
+                )
+                // O PC devolve o MESMO texto que o app já mostrou como eco local
+                // quando você tocou em enviar. Os dois têm ids diferentes (o eco
+                // nasce aqui, o do PC vem do `user.message`), então o `juntar` —
+                // que deduplica por id — não os reconhece como o mesmo item, e a
+                // sua mensagem aparecia duas vezes na tela.
+                juntar(tirarEcoLocal(atual, novo.text), novo)
+            }
 
             // A chamada vira uma LINHA legivel, no formato do Harness: rotulo
             // ("Comando", "Leitura") e assunto. O JSON dos argumentos vai para o
@@ -128,6 +142,29 @@ object TranscriptReducer {
 
             else -> atual
         }
+    }
+
+    /**
+     * Tira o eco local que corresponde a este texto, se houver.
+     *
+     * O casamento é por TEXTO, e só para o eco local: é o único caso em que dois
+     * itens diferentes são a mesma mensagem. Um por vez, e do fim para o começo,
+     * para que duas mensagens iguais mandadas de propósito continuem sendo duas —
+     * cada eco local casa com um eco do PC, na ordem.
+     *
+     * Limite conhecido: o PC corta textos muito longos antes de mandar, então um
+     * prompt gigante (mais de 12 mil caracteres) pode não casar e continuar
+     * aparecendo duas vezes. É raro e não vale complicar a regra por isso.
+     *
+     * @param atual conversa antes do eco do PC.
+     * @param texto texto que o PC devolveu.
+     * @return a conversa sem o eco local correspondente, quando havia.
+     */
+    private fun tirarEcoLocal(atual: List<TurnItem>, texto: String): List<TurnItem> {
+        if (texto.isBlank()) return atual
+        val indice = atual.indexOfLast { it.id.startsWith(ECO_LOCAL) && it.text == texto }
+        if (indice < 0) return atual
+        return atual.toMutableList().also { it.removeAt(indice) }
     }
 
     /**

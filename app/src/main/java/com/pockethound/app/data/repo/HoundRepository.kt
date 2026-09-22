@@ -279,6 +279,19 @@ class HoundRepository @Inject constructor(
         if (recuperando && recuperacaoAcabou(quadro, agora)) encerrarRecuperacao()
 
         if (quadro.seq > 0L) {
+            // O PC recomeçou a contar (o Harness reiniciou)? Então a marca não
+            // vale mais: sem isto, TUDO o que chega depois é descartado como
+            // repetido e a conversa congela — o defeito de 22/set à noite.
+            // O caso do ↻ (revalidando) fica de fora: ali o que volta para trás
+            // é passado de verdade, e é a marca que o impede de duplicar.
+            if (!revalidando && marca.renumerou(quadro.seq)) {
+                marca.limpar()
+                avisar(
+                    NoticeLevel.Info,
+                    "O PC reiniciou a contagem",
+                    "A conversa nova voltou a ser aceita: o Harness foi reiniciado e a numeração dele recomeçou.",
+                )
+            }
             if (revalidando) reenviados.incrementAndGet()
             if (!marca.aceita(quadro.seq)) return
             // Chegou MUITO depois do que estava na tela: o que vem agora é o
@@ -395,6 +408,15 @@ class HoundRepository @Inject constructor(
                 // ele chega no meio, contando uma história velha — tratá-lo como
                 // fim cortaria a recuperação pela metade.
                 if (quadro.seq != 0L) return
+                // Segunda rede para o PC que renumerou: o desk diz qual é o topo
+                // do anel dele, e um topo muito abaixo da marca é um Harness que
+                // reiniciou. Vale a pena mesmo sem quadro novo nenhum — é o caso
+                // do replay vazio, em que nada chega para denunciar sozinho.
+                if (quadro.payload.to > 0L &&
+                    quadro.payload.to + MarcaDoReplay.FOLGA_RENUMERACAO < marca.ultimo
+                ) {
+                    marca.limpar()
+                }
                 if (recuperando) encerrarRecuperacao()
                 // Numa atualização pedida pelo usuário, é aqui que ela acaba: o PC
                 // já reenviou o que tinha e a cortina fecha.

@@ -180,6 +180,29 @@ data class TurnEventPayload(
     val todos: List<TodoItem> = emptyList(),
     /** Mensagens esperando a vez na fila da sessão, em `inbox`. */
     val queued: Int? = null,
+
+    // ---- retrato do rodapé, em `stats` ----
+    //
+    // Não vem de um evento do Harness: o PC lê as projeções dele (o gasto em
+    // dólar e a ocupação do contexto) e publica junto. Tudo nulo quando o perfil
+    // não tem os plugins que calculam — aí a linha simplesmente não aparece.
+
+    /** Gasto da sessão em dólar, tarifado no horário de cada requisição. */
+    val usd: Double? = null,
+    /** Quanto desse gasto caiu em horário de pico (preço cheio). */
+    val usdPico: Double? = null,
+    /** Tokens de entrada somados (com e sem cache). */
+    val entrada: Long? = null,
+    /** Tokens de saída somados. */
+    val saida: Long? = null,
+    /** Quanto da entrada veio do cache (barato). */
+    val cache: Long? = null,
+    /** Nome do modelo, só para o rótulo. */
+    val modelo: String? = null,
+    /** Tokens que a PRÓXIMA requisição vai levar. */
+    val contextoUsado: Long? = null,
+    /** Janela de contexto do modelo. */
+    val contextoJanela: Long? = null,
 )
 
 /** Uma chamada de ferramenta embutida no fechamento do passo. */
@@ -220,6 +243,16 @@ object TurnKind {
 
     /** Tamanho da fila da sessão mudou: é o "N na fila" que a tela mostra. */
     const val Inbox = "inbox"
+
+    /**
+     * Retrato do gasto e do contexto — não é evento do Harness.
+     *
+     * O plugin do celular lê as projeções do próprio Harness (o preço por horário
+     * vem do plugin `session-cost`, a ocupação do contexto do `dsh-token-meter`) e
+     * publica este retrato. Ler em vez de recalcular é o que faz o celular e o
+     * navegador mostrarem o MESMO número.
+     */
+    const val Stats = "stats"
 }
 
 @Serializable

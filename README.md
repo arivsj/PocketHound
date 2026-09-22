@@ -5,8 +5,12 @@ O celular manda o pedido, o PC executa no Harness, e **tudo o que o Harness pens
 escreve e pede volta para o celular em tempo real** — inclusive os **pedidos de
 aprovação**, que você decide de onde estiver.
 
-O par deste repositório é o **PocketHound desk** (Electron, no PC) e o plugin
-**dsh-pockethound** (dentro do DSH). A especificação completa está em
+O par deste repositório é o **PocketHound desk** (Electron, no PC) e os plugins do
+Harness, que vivem em **[arivsj/dsh-plugins](https://github.com/arivsj/dsh-plugins)**:
+o [`pockethound`](https://github.com/arivsj/dsh-plugins/tree/main/pockethound), que
+abre a ponte por onde este app fala (**obrigatório**), e o
+[`session-cost`](https://github.com/arivsj/dsh-plugins/tree/main/session-cost), de
+onde vem o valor em dólar do rodapé (opcional). A especificação completa está em
 `docs/ARQUITETURA.md` e `docs/DESIGN.md` do repositório do desk.
 
 ---
@@ -225,7 +229,16 @@ Hilt 2.57.1 · Ktor 3.0.3 · compileSdk/targetSdk 36 · minSdk 26.
   mudar; (4) uma conexão QUIC zumbi era reaproveitada e pendurava o pedido por até
   3 minutos — agora o fluxo descarta a conexão ao terminar e um comando repetível
   ganha uma segunda tentativa com handshake novo.
-- **Testes** de JVM (**128**, todos passando): `ContractTest`, `SseDecoderTest`,
+- **Custo e contexto no rodapé** (`ui/chat/ChatScreen.kt` + `core/session/TurnStatus.kt`):
+  abaixo do campo de prompt aparece `US$ 0,0142 · contexto 12% · 120k tokens`. O
+  gasto **não é calculado aqui**: o plugin do celular lê as projeções do Harness (o
+  `session-cost`, que tarifa cada requisição no horário dela, e o medidor de
+  contexto do próprio Harness) e publica um quadro `stats` — assim o celular e o
+  navegador mostram o mesmo número. O retrato é **estado**: o desk o reenvia a cada
+  conexão, então quem abre o app depois vê o gasto. Sem os plugins, a linha
+  simplesmente não aparece. O botão **enviar ficou à direita**, como em mensageiro, e
+  o `steer` (o modo que interrompe o turno em curso) ficou na esquerda.
+- **Testes** de JVM (**137**, todos passando): `ContractTest`, `SseDecoderTest`,
   `TranscriptReducerTest`, `TranscriptRowsTest`, `AtualizacaoTest`,
   `CaudaDoReplayTest`, `LanBeaconTest`, `P2pFramingTest`, `FramesTest`,
   `PairingPayloadTest`, `QrDecodeTest`, `PromptWatchdogTest`, `SessionOrderTest`,

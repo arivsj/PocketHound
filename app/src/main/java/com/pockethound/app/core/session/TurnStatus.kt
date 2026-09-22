@@ -20,6 +20,11 @@ import com.pockethound.app.core.model.TurnKind
  * @param queued mensagens na fila, como o PC informou.
  * @param tokensIn tokens de entrada somados nesta sessao.
  * @param tokensOut tokens de saida somados nesta sessao.
+ * @param custoUsd gasto da sessao em dolar, como o PC calculou.
+ * @param custoUsdPico quanto desse gasto caiu em horario de pico.
+ * @param contextoUsado tokens que a proxima requisicao vai levar.
+ * @param contextoJanela janela de contexto do modelo.
+ * @param modelo id do modelo que esta valendo nesta sessao, como o PC informou.
  */
 data class TurnStatus(
     val running: Boolean = false,
@@ -30,10 +35,26 @@ data class TurnStatus(
     val queued: Int = 0,
     val tokensIn: Long = 0L,
     val tokensOut: Long = 0L,
+    val custoUsd: Double = 0.0,
+    val custoUsdPico: Double = 0.0,
+    val entrada: Long = 0L,
+    val saida: Long = 0L,
+    val cache: Long = 0L,
+    val contextoUsado: Long = 0L,
+    val contextoJanela: Long = 0L,
+    val modelo: String? = null,
 ) {
     /** Ha quanto tempo o turno esta aberto, do ponto de vista de [agora]. */
     fun decorrido(agora: Long): Long =
         if (running && startedAt > 0L) (agora - startedAt).coerceAtLeast(0L) else 0L
+
+    /** O contexto esta enchendo? Nulo enquanto o PC nao informou a janela. */
+    val contextoPct: Double?
+        get() = if (contextoJanela > 0L) contextoUsado.toDouble() / contextoJanela.toDouble() * 100.0 else null
+
+    /** Ha o que mostrar no rodape? (gasto ou contexto) */
+    val temRetrato: Boolean
+        get() = custoUsd > 0.0 || contextoJanela > 0L
 }
 
 /**
@@ -92,6 +113,21 @@ object TurnStatusReducer {
             )
 
             TurnKind.Inbox -> atual.copy(queued = payload.queued ?: atual.queued)
+
+            // O retrato do rodape vem do PC, que le as projecoes do Harness. Cada
+            // campo so entra quando veio: o PC pode saber o contexto e nao o
+            // preco (perfil sem o plugin de custo), e um nulo nao pode apagar o
+            // que ja estava na tela.
+            TurnKind.Stats -> atual.copy(
+                custoUsd = payload.usd ?: atual.custoUsd,
+                custoUsdPico = payload.usdPico ?: atual.custoUsdPico,
+                entrada = payload.entrada ?: atual.entrada,
+                saida = payload.saida ?: atual.saida,
+                cache = payload.cache ?: atual.cache,
+                contextoUsado = payload.contextoUsado ?: atual.contextoUsado,
+                contextoJanela = payload.contextoJanela ?: atual.contextoJanela,
+                modelo = payload.modelo ?: atual.modelo,
+            )
 
             else -> atual
         }

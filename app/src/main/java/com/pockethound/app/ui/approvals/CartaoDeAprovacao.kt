@@ -27,6 +27,7 @@ import com.pockethound.app.ui.common.PhBar
 import com.pockethound.app.ui.common.PhButton
 import com.pockethound.app.ui.common.PhButtonVariant
 import com.pockethound.app.ui.common.PhCard
+import com.pockethound.app.ui.common.PH_SEM_PRAZO_MS
 import com.pockethound.app.ui.common.PhTone
 import com.pockethound.app.ui.theme.PhAmber
 import com.pockethound.app.ui.theme.PhDanger
@@ -62,10 +63,13 @@ fun CartaoDeAprovacao(
     onAllow: () -> Unit,
     onReject: () -> Unit,
 ) {
+    // Sem prazo, não há contagem regressiva para mostrar: o cartão fica até
+    // alguém responder — na tela do PC ou aqui.
+    val semPrazo = request.expiresAt - nowMs > PH_SEM_PRAZO_MS
     val total = 90_000f
     val remaining = (request.expiresAt - nowMs).coerceAtLeast(0L)
-    val progress = (remaining / total).coerceIn(0f, 1f)
-    val urgent = remaining < 20_000L
+    val progress = if (semPrazo) 1f else (remaining / total).coerceIn(0f, 1f)
+    val urgent = !semPrazo && remaining < 20_000L
 
     PhCard(
         modifier = Modifier.fillMaxWidth(),
@@ -81,7 +85,7 @@ fun CartaoDeAprovacao(
             PhBadge(text = request.toolName, tone = PhTone.Neutral)
             Box(modifier = Modifier.weight(1f))
             Text(
-                text = (remaining / 1000L).toString() + "s",
+                text = if (semPrazo) "sem prazo" else (remaining / 1000L).toString() + "s",
                 color = if (urgent) PhDanger else PhTextDim,
                 style = MaterialTheme.typography.labelMedium,
             )

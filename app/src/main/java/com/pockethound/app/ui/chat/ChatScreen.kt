@@ -50,6 +50,7 @@ import com.pockethound.app.core.model.TurnItem
 import com.pockethound.app.core.model.TurnItemKind
 import com.pockethound.app.core.session.EstadoDaAtualizacao
 import com.pockethound.app.core.session.PromptAck
+import com.pockethound.app.core.session.PromptDaResposta
 import com.pockethound.app.core.session.PromptStatus
 import com.pockethound.app.core.session.SessionOrder
 import com.pockethound.app.core.session.TurnStatus
@@ -74,6 +75,7 @@ import com.pockethound.app.ui.theme.PhText
 import com.pockethound.app.ui.theme.PhTextDim
 import com.pockethound.app.ui.theme.PhViolet
 import com.pockethound.app.ui.theme.PhVioletSoft
+import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -109,6 +111,11 @@ fun ChatScreen(viewModel: RootViewModel) {
     // Mesma regra do repositorio: a escolhida, senao a mais recente em atividade.
     val active: Session? = SessionOrder.resolve(sessions, activeId)
     val items = transcript[active?.id].orEmpty()
+
+    // "Respondendo a: <prompt>" acima da resposta. A ligação sai da ordem da
+    // conversa; quando a ordem mente (dois prompts na fila antes da primeira
+    // resposta), a regra cala em vez de apontar o prompt errado.
+    val prompts by remember(items) { mutableStateOf(PromptDaResposta.casar(items)) }
 
     // O aviso so vale para a sessao que esta na tela: o de outro destino nao e
     // daqui e apareceria como alarme falso.
@@ -289,11 +296,23 @@ fun ChatScreen(viewModel: RootViewModel) {
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     items(items = items, key = { it.id }) { item ->
-                        LinhaDaTranscricao(
-                            item = item,
-                            aberto = abertos[item.id] == true,
-                            onToggle = { abertos[item.id] = abertos[item.id] != true },
-                        )
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            prompts[item.id]?.let { prompt ->
+                                Text(
+                                    text = "\u21B3 respondendo a: " + primeiraLinha(prompt),
+                                    color = PhTextDim,
+                                    style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.padding(start = 4.dp, bottom = 2.dp),
+                                )
+                            }
+                            LinhaDaTranscricao(
+                                item = item,
+                                aberto = abertos[item.id] == true,
+                                onToggle = { abertos[item.id] = abertos[item.id] != true },
+                            )
+                        }
                     }
 
                     // A APROVACAO MORA AQUI. Ela nasceu numa aba propria e mudou de
@@ -358,6 +377,7 @@ fun ChatScreen(viewModel: RootViewModel) {
                     // acompanhar, mesmo que estivesse lendo mais acima.
                     seguindo.value = true
                 },
+                turno = turno,
             )
         }
     }
@@ -792,11 +812,82 @@ private fun LinhaDePasso(item: TurnItem, aberto: Boolean, onToggle: () -> Unit) 
 private fun primeiraLinha(texto: String): String =
     texto.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() }.orEmpty().take(90)
 
+/**
+ * A faixa acima do campo de prompt: fila de um lado, modelo do outro.
+ *
+ * A fila merece um botao porque ela responde a duvida que aparece o tempo todo —
+ * "o meu prompt entrou?" — e um numero solto no meio de outra linha nao responde.
+ * Tocar explica o que ela e; tocar de novo esconde.
+ *
+ * O modelo fica a direita: e o que se confere antes de escrever.
+ *
+ * @param turno estado da sessao — fila e modelo saem daqui.
+ */
+@Composable
+private fun FaixaDaFilaEModelo(turno: TurnStatus) {
+    var explicando by remember { mutableStateOf(false) }
+    if (turno.queued <= 0 && turno.modelo.isNullOrBlank()) return
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            if (turno.queued > 0) {
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { explicando = !explicando }
+                        .background(PhAmber.copy(alpha = 0.14f))
+                        .border(1.dp, PhAmber.copy(alpha = 0.45f), RoundedCornerShape(8.dp))
+                        .padding(horizontal = 8.dp, vertical = 3.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                ) {
+                    Text(
+                        text = "\uD83D\uDCAC",
+                        style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+                    )
+                    Text(
+                        text = turno.queued.toString(),
+                        color = PhAmber,
+                        style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+            }
+            Box(modifier = Modifier.weight(1f))
+            turno.modelo?.takeIf { it.isNotBlank() }?.let { modelo ->
+                PhBadge(text = modelo, tone = PhTone.Neutral)
+            }
+        }
+        if (explicando && turno.queued > 0) {
+            Text(
+                text = "Prompt na fila ja foi aceito pelo PC: entra quando o turno atual terminar. " +
+                    "Nada se perdeu — nao precisa mandar de novo.",
+                color = PhTextDim,
+                style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+            )
+        }
+    }
+}
+/**
+ * O composer: campo, botoes e o retrato da sessao.
+ *
+ * O **enviar fica a direita**, como em todo mensageiro — a mao ja vai la. O
+ * `steer` fica sozinho na esquerda, que e onde ele nao atrapalha: e o modo raro.
+ *
+ * @param value rascunho.
+ * @param onValueChange escrita do rascunho.
+ * @param onSend envio (modo followup: entra na fila do proximo turno).
+ * @param turno estado da sessao — de onde sai o gasto e o contexto.
+ */
 @Composable
 private fun Composer(
     value: String,
     onValueChange: (String) -> Unit,
     onSend: () -> Unit,
+    turno: TurnStatus,
 ) {
     Column(
         modifier = Modifier
@@ -805,6 +896,8 @@ private fun Composer(
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
+        // Fila e modelo, acima do campo: o que voce confere antes de escrever.
+        FaixaDaFilaEModelo(turno)
         PhTextField(
             value = value,
             onValueChange = onValueChange,
@@ -814,20 +907,68 @@ private fun Composer(
             minLines = 1,
             maxLines = 5,
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            PhButton(
-                text = "enviar",
-                onClick = onSend,
-                enabled = value.isNotBlank(),
-                icon = Icons.Filled.Send,
-            )
-            // TODO(pockethound): alternar followup/steer (PromptMode) no envio.
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            // TODO(pockethound): o steer e o modo que INTERROMPE o turno em curso
+            // e injeta a mensagem no meio dele (PromptMode.Steer). O caminho ja
+            // existe no PC (`target.steer`), falta a tela decidir quando oferecer.
             PhButton(
                 text = "steer",
                 onClick = onSend,
                 variant = PhButtonVariant.Ghost,
                 enabled = false,
             )
+            // Empurra o enviar para a direita.
+            Box(modifier = Modifier.weight(1f))
+            PhButton(
+                text = "enviar",
+                onClick = onSend,
+                enabled = value.isNotBlank(),
+                icon = Icons.Filled.Send,
+            )
         }
+
+        // O retrato embaixo do campo, como voce pediu: quanto a sessao custou e
+        // quanto do contexto ja foi. Vem do PC, que le as projecoes do Harness.
+        RetratoDaSessao(turno)
     }
+}
+
+/**
+ * Gasto da sessao e ocupacao do contexto, numa linha discreta.
+ *
+ * Some quando nao ha nada para dizer — sessao nova, perfil sem os plugins que
+ * calculam, ou PC que ainda nao mandou o retrato. Silencio e melhor que "US$ 0"
+ * piscando no rodape de toda conversa.
+ *
+ * @param turno estado da sessao na tela.
+ */
+@Composable
+private fun RetratoDaSessao(turno: TurnStatus) {
+    if (!turno.temRetrato) return
+    val partes = buildList {
+        if (turno.custoUsd > 0.0) add(emDolar(turno.custoUsd))
+        turno.contextoPct?.let { add("contexto " + it.roundToInt() + "%") }
+        val tokens = turno.entrada + turno.saida
+        if (tokens > 0L) add(compacto(tokens) + " tokens")
+    }
+    if (partes.isEmpty()) return
+    Text(
+        text = partes.joinToString("  ·  "),
+        color = PhTextDim,
+        style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier.fillMaxWidth(),
+    )
+}
+
+/** "US$ 0,0142" — casas suficientes para o valor nao virar zero na tela. */
+private fun emDolar(valor: Double): String {
+    if (!valor.isFinite() || valor <= 0.0) return "US$ 0"
+    val casas = if (valor < 0.01) 4 else if (valor < 1.0) 3 else 2
+    return "US$ " + String.format(java.util.Locale("pt", "BR"), "%." + casas + "f", valor)
 }

@@ -8,7 +8,14 @@
 > caminho direto/P2P, conexão QUIC zumbi reaproveitada). **107 testes de JVM,
 > todos passando**; APK de debug reconstruído. O diagnóstico da conexão e as
 > opções de caminho estão em **`CONEXAO.md`** — leia antes de mexer em transporte.
-> Nada foi commitado: a regra da casa pede autorização antes.
+>
+> **Para retomar, leia `PENDENCIAS.md`**: o bug da aprovação pendente está
+> **resolvido e confirmado em campo** (a causa era o plugin não publicar o pedido
+> quando não havia celular conectado; a correção é o `waitForPhone`), com o estado
+> dos três repositórios e o roteiro para repetir o teste.
+>
+> Nada foi commitado depois de `81d837b` (app) e `da0e61d` (desk): a regra da casa
+> pede autorização a cada commit.
 
 Documento de passagem: o que está pronto, o que foi descoberto, o que ficou em
 aberto e por onde continuar. Apague quando não servir mais.

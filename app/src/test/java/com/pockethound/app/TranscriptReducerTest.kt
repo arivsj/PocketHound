@@ -193,4 +193,57 @@ class TranscriptReducerTest {
         )
         assertEquals("a mesma lista, sem cópia", atual, depois)
     }
+
+    /* ------------------------------------------- o eco local x o eco do PC */
+
+    private fun ecoLocal(texto: String) =
+        TurnItem(id = TranscriptReducer.ECO_LOCAL + "1", kind = TurnItemKind.UserMessage, text = texto)
+
+    private fun doPc(texto: String, seq: Long = 42): IncomingFrame = quadroDeTurno(
+        TurnEventPayload(kind = TurnKind.UserMessage, text = texto),
+        seq,
+    )
+
+    @Test
+    fun `o eco do PC substitui o eco local, sem duplicar a mensagem`() {
+        // O app mostra a mensagem no instante do toque (eco local) e o PC devolve
+        // o mesmo texto como `user.message`. Sem casar os dois, a sua mensagem
+        // aparecia duas vezes: era o que se via no celular.
+        val comEco = listOf(ecoLocal("faz o build"))
+
+        val depois = TranscriptReducer.reduce(comEco, doPc("faz o build"))
+
+        assertEquals("um balão só", 1, depois.size)
+        assertEquals("faz o build", depois[0].text)
+        assertTrue("fica o item do PC, não o local", depois[0].id == "u-42")
+    }
+
+    @Test
+    fun `duas mensagens iguais mandadas de propósito continuam duas`() {
+        // O casamento tira UM eco por vez; sem isso, mandar a mesma frase duas
+        // vezes apagaria a primeira da tela.
+        var t = listOf(ecoLocal("repete"), ecoLocal("repete"))
+        t = TranscriptReducer.reduce(t, doPc("repete", seq = 1))
+        t = TranscriptReducer.reduce(t, doPc("repete", seq = 2))
+
+        assertEquals(2, t.size)
+        assertEquals(listOf("u-1", "u-2"), t.map { it.id })
+    }
+
+    @Test
+    fun `eco local de outro texto nao e comido`() {
+        val comEco = listOf(ecoLocal("primeira"))
+
+        val depois = TranscriptReducer.reduce(comEco, doPc("outra coisa"))
+
+        assertEquals("o eco de outro texto fica", 2, depois.size)
+    }
+
+    @Test
+    fun `mensagem que nasce no PC (sem eco local) entra normalmente`() {
+        val depois = TranscriptReducer.reduce(emptyList(), doPc("veio do PC"))
+
+        assertEquals(1, depois.size)
+        assertEquals("u-42", depois[0].id)
+    }
 }

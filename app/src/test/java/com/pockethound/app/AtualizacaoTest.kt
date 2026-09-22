@@ -78,6 +78,35 @@ class AtualizacaoTest {
         assertEquals(900L, marca.ultimo)
     }
 
+    /* ------------------------------------------- o PC que recomeça a contar */
+
+    @Test
+    fun `a marca percebe quando o PC reinicia a contagem`() {
+        // O `seq` nasce dentro do Harness: reiniciar o Harness recomeça a
+        // numeração em 1. Sem perceber isso, o app descarta TODA a conversa nova
+        // como "já vista" e a tela congela — o defeito de 22/set à noite.
+        val marca = MarcaDoReplay()
+        marca.marcou(117_000)
+
+        assertTrue("o quadro 1 é de um PC que recomeçou", marca.renumerou(1))
+        assertTrue("e o 12 mil também", marca.renumerou(12_000))
+        assertFalse("mas um quadro logo abaixo do cursor não: é replay", marca.renumerou(116_900))
+        assertFalse("nem a marca zerada, que não tem o que comparar", MarcaDoReplay().renumerou(1))
+    }
+
+    @Test
+    fun `depois de limpar, a conversa nova volta a ser aceita`() {
+        val marca = MarcaDoReplay()
+        marca.marcou(117_000)
+
+        // É o que o app faz ao ver a renumeração.
+        if (marca.renumerou(1)) marca.limpar()
+
+        assertTrue("o quadro 1 passa", marca.aceita(1))
+        marca.marcou(1)
+        assertFalse("e o mesmo 1 de novo não", marca.aceita(1))
+    }
+
     /* ------------------------------------------------- o redutor é idempotente */
 
     private fun quadro(payload: TurnEventPayload, seq: Long): IncomingFrame =

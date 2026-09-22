@@ -98,4 +98,49 @@ class TurnStatusTest {
         assertFalse(TurnStatusReducer.sessao(aberto, viva = false).running)
         assertTrue(TurnStatusReducer.sessao(aberto, viva = true).running)
     }
+
+
+    /* ------------------------------------------- o retrato do rodape (stats) */
+
+    @Test
+    fun retratoDoRodapeEntraNoEstado() {
+        // O PC lê as projeções do Harness (gasto em dólar e ocupação do contexto)
+        // e publica este retrato. É o que o celular desenha embaixo do composer.
+        val estado = passo(
+            TurnStatus(),
+            TurnEventPayload(
+                kind = TurnKind.Stats,
+                usd = 0.0123,
+                usdPico = 0.0,
+                entrada = 119_000_000L,
+                saida = 383_600L,
+                cache = 118_000_000L,
+                contextoUsado = 120_000L,
+                contextoJanela = 1_000_000L,
+            ),
+            ts = 10,
+        )
+
+        assertEquals(0.0123, estado.custoUsd, 0.0000001)
+        assertEquals(119_000_000L, estado.entrada)
+        // 120 mil de 1 milhão: 12%.
+        assertEquals(12.0, estado.contextoPct!!, 0.01)
+        assertTrue(estado.temRetrato)
+    }
+
+    @Test
+    fun retratoIncompletoNaoApagaOQueJaVeio() {
+        // Perfil sem o plugin de custo manda só o contexto; perfil sem o medidor
+        // manda só o gasto. Um nulo não pode zerar o que já estava na tela.
+        val comCusto = passo(TurnStatus(), TurnEventPayload(kind = TurnKind.Stats, usd = 0.5), ts = 10)
+        val depois = passo(comCusto, TurnEventPayload(kind = TurnKind.Stats, contextoJanela = 1_000_000L, contextoUsado = 250_000L), ts = 11)
+
+        assertEquals("o gasto ficou", 0.5, depois.custoUsd, 0.0000001)
+        assertEquals("e o contexto chegou", 25.0, depois.contextoPct!!, 0.1)
+    }
+
+    @Test
+    fun sessaoSemRetratoNaoMostraLinha() {
+        assertFalse(TurnStatus().temRetrato)
+    }
 }

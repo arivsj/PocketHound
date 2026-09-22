@@ -22,6 +22,7 @@ import com.pockethound.app.ui.common.PhButton
 import com.pockethound.app.ui.common.PhButtonVariant
 import com.pockethound.app.ui.common.PhCard
 import com.pockethound.app.ui.common.PhTextField
+import com.pockethound.app.ui.common.PH_SEM_PRAZO_MS
 import com.pockethound.app.ui.common.PhTone
 import com.pockethound.app.ui.theme.PhText
 import com.pockethound.app.ui.theme.PhTextDim
@@ -70,7 +71,7 @@ fun CartaoDePergunta(
                 text = when {
                     resposta?.por == "desktop" -> "no PC"
                     respondida -> "aqui"
-                    restante > 0 -> (restante / 1000L).toString() + "s"
+                    restante in 1..PH_SEM_PRAZO_MS -> (restante / 1000L).toString() + "s"
                     else -> "sem prazo"
                 },
                 color = PhTextDim,

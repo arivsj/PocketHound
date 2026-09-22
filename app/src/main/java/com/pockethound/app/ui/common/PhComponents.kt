@@ -262,6 +262,16 @@ fun PhCard(
 // PhButton
 // ---------------------------------------------------------------------------
 
+/**
+ * A partir daqui um prazo deixa de ser contagem regressiva.
+ *
+ * Os cartões de aprovação e de pergunta podem chegar SEM prazo: quando a tela do
+ * PC pergunta ao mesmo tempo, o cartão do celular vive enquanto a pergunta viver.
+ * O PC manda então o maior valor que o Node aceita (2^31-1 ms, quase 25 dias) —
+ * número que não ajuda ninguém e faria a tela escrever "2147483s".
+ */
+const val PH_SEM_PRAZO_MS = 5 * 60_000L
+
 enum class PhButtonVariant { Primary, Danger, Ghost }
 
 /**

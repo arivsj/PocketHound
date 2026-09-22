@@ -281,6 +281,17 @@ class SessionClient @Inject constructor(
             _state.value = _state.value.copy(cursor = quadro.seq)
             guardarCursor(quadro.seq)
         }
+        // O PC renumerou (Harness reiniciado): o cursor guardado aponta para uma
+        // numeração que não existe mais, e pedir "tudo depois de 117 mil" a um PC
+        // que está no 12 mil não devolve nada — para sempre. O `replay.done` do
+        // desk carrega o topo do anel dele: é a hora de voltar à realidade.
+        if (quadro is IncomingFrame.ReplayDone && quadro.seq == 0L) {
+            val topo = quadro.payload.to
+            if (topo > 0L && topo + MarcaDoReplay.FOLGA_RENUMERACAO < _state.value.cursor) {
+                _state.value = _state.value.copy(cursor = topo)
+                guardarCursor(topo)
+            }
+        }
         _frames.emit(quadro)
     }
 
