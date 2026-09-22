@@ -96,6 +96,19 @@ interface Transport {
 }
 
 /**
+ * Teto de quadros que o celular aceita receber de uma vez num replay.
+ *
+ * Sem ele, voltar depois de um tempo fora empurrava o anel inteiro do PC (até
+ * 4 000 quadros, centenas de KB) pelo rádio antes de a primeira mensagem nova
+ * aparecer — e o que interessa está no **fim** dessa fila. Com o teto, o que
+ * passou do corte simplesmente não viaja: o cursor anda do mesmo jeito, então o
+ * app não fica devendo nada.
+ *
+ * Um PC sem o parâmetro continua mandando tudo (o parâmetro é opcional lá).
+ */
+const val REPLAY_TAIL = 400
+
+/**
  * Caminho direto: HTTP + SSE em `http://<ip>:<porta>` (ARQUITETURA.md §7).
  *
  * O token vai em `Authorization: Bearer` em toda chamada, inclusive o SSE — a
@@ -104,11 +117,14 @@ interface Transport {
  * @param baseUrl endereço do desk, sem barra final.
  * @param tokenProvider token do dispositivo, lido do armazenamento seguro.
  * @param client cliente Ktor compartilhado (timeouts e conversores já montados).
+ * @param rotulo como este caminho se chama na tela ("lan" quando o endereço veio
+ *   do farol, "direct" quando é o que ficou gravado no pareamento).
  */
 class DirectTransport(
     private val baseUrl: String,
     private val tokenProvider: suspend () -> String?,
     private val client: HttpClient,
+    private val rotulo: String = "direct",
 ) : Transport {
 
     private val raiz: String = baseUrl.trimEnd('/')
@@ -135,7 +151,7 @@ class DirectTransport(
 
     override fun events(cursor: Long): Flow<IncomingFrame> = flow {
         val token = tokenProvider()
-        val resposta: HttpResponse = client.get("$raiz/ph/stream?cursor=$cursor") {
+        val resposta: HttpResponse = client.get("$raiz/ph/stream?cursor=$cursor&tail=$REPLAY_TAIL") {
             header(HttpHeaders.Accept, "text/event-stream")
             if (token != null) header(HttpHeaders.Authorization, "Bearer $token")
         }
@@ -166,14 +182,14 @@ class DirectTransport(
                 TransportHealth(
                     reachable = true,
                     latencyMs = System.currentTimeMillis() - iniciado,
-                    path = "direct",
+                    path = rotulo,
                     endpoint = raiz,
                 )
             } else {
-                TransportHealth(false, path = "direct", endpoint = raiz, reason = "HTTP ${resposta.status.value}")
+                TransportHealth(false, path = rotulo, endpoint = raiz, reason = "HTTP ${resposta.status.value}")
             }
         } catch (erro: Throwable) {
-            TransportHealth(false, path = "direct", endpoint = raiz, reason = erro::class.simpleName)
+            TransportHealth(false, path = rotulo, endpoint = raiz, reason = erro::class.simpleName)
         }
     }
 
@@ -195,22 +211,31 @@ data class SelectedTransport(
  * No modo AUTO sonda o direto com limite curto e cai para o P2P. A ordem importa:
  * na mesma rede o direto é mais rápido e não depende de relay; fora dela o
  * direto nem responde, e insistir nele custaria a paciência do usuário.
+ *
+ * ## O endereço do PC vem de dois lugares
+ *
+ * O gravado no pareamento (que envelhece: o DHCP troca o IP do PC e o celular
+ * muda de rede) e o **farol** que o PC grita na rede local a cada 3 s
+ * ([LanBeacon]). O farol ganha quando existe e é de confiança, porque é o
+ * endereço de AGORA — e é ele que faz "estou em casa, na mesma rede" voltar a
+ * significar alguma coisa.
  */
 @Singleton
 class TransportSelector @Inject constructor(
     private val settingsStorage: SettingsStorage,
     private val irohProvider: IrohEndpointProvider,
     private val json: Json,
+    private val lanBeacon: LanBeacon,
 ) {
     /**
-     * A escolha vale por um minuto.
+     * A escolha vale por um minuto — mas cai na hora se o endereço do farol mudar.
      *
      * Sondar a rede a cada comando custa caro e, pior, faz o app parecer quebrado:
      * um POST que deveria sair em 150 ms esperava a sonda do caminho direto (1,5 s)
      * ou, quando ela falhava, a do túnel (ate 15 s). Com o fluxo vivo, o caminho
      * ja esta provado — nao ha o que sondar de novo a cada tecla.
      */
-    private var cache: Pair<SelectedTransport, Long>? = null
+    private var cache: Triple<SelectedTransport, Long, String>? = null
 
     /** Esquece a escolha; o proximo envio sonda de novo. */
     fun invalidar() {
@@ -228,11 +253,21 @@ class TransportSelector @Inject constructor(
         forceRefresh: Boolean = false,
     ): SelectedTransport {
         val agora = System.currentTimeMillis()
-        cache?.let { (escolhido, quando) ->
-            if (!forceRefresh && agora - quando < VALIDADE_MS) return escolhido
+        val descoberto = lanBeacon.pc.value
+        val enderecoLan = descoberto?.baseUrl.orEmpty()
+        cache?.let { (escolhido, quando, lanDeEntao) ->
+            val vale = !forceRefresh && agora - quando < VALIDADE_MS && lanDeEntao == enderecoLan
+            if (vale) return escolhido
         }
         val sessao = settingsStorage.read()
-        val direto = DirectTransport(sessao.directBaseUrl, tokenProvider, client)
+        // O farol manda: é o endereço de agora. O gravado no pareamento continua
+        // valendo como segundo caminho quando não há farol (ou quando ele é de
+        // outra máquina que não esta).
+        val direto = if (descoberto != null) {
+            DirectTransport(descoberto.baseUrl, tokenProvider, client, rotulo = "lan")
+        } else {
+            DirectTransport(sessao.directBaseUrl, tokenProvider, client)
+        }
         // O ticket e lido na hora, nao capturado: o pareamento pode acontecer
         // depois de o seletor existir.
         val p2p = P2pTransport(
@@ -256,7 +291,7 @@ class TransportSelector @Inject constructor(
                 }
             }
         }
-        cache = escolhido to agora
+        cache = Triple(escolhido, agora, enderecoLan)
         return escolhido
     }
 

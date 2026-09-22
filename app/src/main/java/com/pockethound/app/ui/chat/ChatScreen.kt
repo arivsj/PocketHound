@@ -22,6 +22,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -47,6 +48,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.pockethound.app.core.model.Session
 import com.pockethound.app.core.model.TurnItem
 import com.pockethound.app.core.model.TurnItemKind
+import com.pockethound.app.core.session.EstadoDaAtualizacao
 import com.pockethound.app.core.session.PromptAck
 import com.pockethound.app.core.session.PromptStatus
 import com.pockethound.app.core.session.SessionOrder
@@ -102,6 +104,7 @@ fun ChatScreen(viewModel: RootViewModel) {
     val approvals by viewModel.approvals.collectAsStateWithLifecycle()
     val decisoes by viewModel.decisoes.collectAsStateWithLifecycle()
     val perguntas by viewModel.perguntas.collectAsStateWithLifecycle()
+    val atualizacao by viewModel.atualizacao.collectAsStateWithLifecycle()
 
     // Mesma regra do repositorio: a escolhida, senao a mais recente em atividade.
     val active: Session? = SessionOrder.resolve(sessions, activeId)
@@ -233,7 +236,20 @@ fun ChatScreen(viewModel: RootViewModel) {
                 text = if (link.isOnline) "ao vivo" else "offline",
                 tone = if (link.isOnline) PhTone.Ok else PhTone.Danger,
                 glyph = true,
-                modifier = Modifier.padding(end = 8.dp),
+                modifier = Modifier.padding(end = 4.dp),
+            )
+            // "Atualizar" é SÓ o ícone de propósito: com o rótulo, três
+            // controles nesta barra de 48 dp não deixariam nada para o título da
+            // sessão. O nome fica na descrição, para quem lê a tela por leitor.
+            PhButton(
+                text = "",
+                onClick = { viewModel.atualizar() },
+                variant = PhButtonVariant.Ghost,
+                icon = Icons.Filled.Refresh,
+                description = "atualizar a conversa",
+                loading = atualizacao.emCurso,
+                enabled = !atualizacao.emCurso,
+                modifier = Modifier.padding(end = 2.dp),
             )
             PhButton(
                 text = "parar",
@@ -325,6 +341,8 @@ fun ChatScreen(viewModel: RootViewModel) {
                     scope.launch { descer(animado = true) }
                 }
             }
+
+            if (atualizacao.pedida) FaixaDaAtualizacao(atualizacao)
 
             FaixaDeEstado(turno = turno, agora = agora, temHistorico = items.isNotEmpty())
 
@@ -472,6 +490,48 @@ private fun AvisoDePrompt(estado: PromptStatus) {
             )
         }
     }
+}
+
+/**
+ * Linha do "atualizar": conta o que o reenvio trouxe.
+ *
+ * Ela existe porque "toquei e não mudou nada" tem duas causas opostas — não
+ * havia nada para vir, ou o PC não respondeu — e sem esta linha as duas ficam
+ * idênticas na tela. É a mesma ideia do aviso de prompt, um degrau abaixo.
+ *
+ * @param estado retrato do último pedido de atualização.
+ */
+@Composable
+private fun FaixaDaAtualizacao(estado: EstadoDaAtualizacao) {
+    val cor = when {
+        estado.emCurso -> PhInfo
+        estado.semConfirmacao -> PhAmber
+        estado.novidades > 0 -> PhOk
+        else -> PhTextDim
+    }
+    val texto = when {
+        estado.emCurso -> "buscando no PC o que chegou…"
+
+        estado.semConfirmacao -> "não deu para confirmar: " + estado.motivo
+
+        estado.novidades > 0 ->
+            "atualizado · " + estado.novidades + (if (estado.novidades == 1) " novidade" else " novidades")
+
+        // Zero novidade não é falha: é a resposta certa para uma tela que já
+        // estava completa, e é bom que ela seja dita em voz baixa.
+        else -> "nada novo — o PC não tinha nada além do que já está aqui"
+    }
+    Text(
+        text = texto,
+        color = cor,
+        style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+        maxLines = 2,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .padding(bottom = 6.dp),
+    )
 }
 
 /**

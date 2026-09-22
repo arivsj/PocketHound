@@ -1,5 +1,15 @@
 # Estado do trabalho — 11/set, 20:5x
 
+> **Atualização de 22/set** (esta rodada): corrigido o bug do "sem transcrição ainda" (a cauda esperava um `replay.done` que o PC descarta) e teto de replay na origem (`tail=400`); **só o fim entra** depois de um atraso grande (cauda de 10 mensagens, em vez de horas de replay); **descoberta na LAN** (o app escutando
+> o farol UDP do PC e o farol do desk passando a dizer quais aparelhos ele
+> conhece — em casa o celular acha o PC sozinho, sem IP digitado); botão **↻ atualizar** no chat, com
+> marca d'água de `seq` e redutor idempotente; e quatro correções de reconexão no
+> app (prazo de silêncio que matava o laço, batimento do PC descartado, cache do
+> caminho direto/P2P, conexão QUIC zumbi reaproveitada). **107 testes de JVM,
+> todos passando**; APK de debug reconstruído. O diagnóstico da conexão e as
+> opções de caminho estão em **`CONEXAO.md`** — leia antes de mexer em transporte.
+> Nada foi commitado: a regra da casa pede autorização antes.
+
 Documento de passagem: o que está pronto, o que foi descoberto, o que ficou em
 aberto e por onde continuar. Apague quando não servir mais.
 

@@ -483,6 +483,22 @@ sealed interface IncomingFrame {
         val payload: PongPayload,
     ) : IncomingFrame
 
+    /**
+     * Batimento do PC: a linha de comentário do SSE (`: beat`), sem conteúdo.
+     *
+     * Não é dado e não entra em nenhuma transcrição — mas **conta como sinal de
+     * vida**, e é só para isso que ele existe aqui. O prazo de silêncio do
+     * [com.pockethound.app.core.session.SessionClient] derruba o fluxo depois de
+     * 45 s sem NENHUMA emissão; sem este quadro, uma conexão saudável e ociosa
+     * (sessão parada, ninguém escrevendo) era derrubada e refeita de tempos em
+     * tempos — que é exatamente o "fica o tempo todo desconectando".
+     */
+    data class Beat(
+        override val seq: Long = 0L,
+        override val ts: Long = 0L,
+        override val session: String? = null,
+    ) : IncomingFrame
+
     /** Tipo que esta versão do app ainda não conhece: guardado, não descartado. */
     data class Unknown(
         val type: String,

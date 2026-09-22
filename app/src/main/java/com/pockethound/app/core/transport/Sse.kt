@@ -49,7 +49,12 @@ object SseDecoder {
                     }
                 }
 
-                linha.startsWith(":") -> Unit // batimento; não é quadro
+                // Batimento do PC (a cada 15 s). Não é dado, mas é SINAL DE VIDA:
+                // quem mede silêncio para derrubar o fluxo — o cliente de sessão —
+                // precisa vê-lo passar. Descartá-lo em silêncio fazia uma conexão
+                // saudável e parada ser derrubada por "silêncio" e refeita de
+                // tempos em tempos.
+                linha.startsWith(":") -> emit(IncomingFrame.Beat())
                 linha.startsWith("data:") -> acumulado.append(linha.removePrefix("data:").trim())
                 // `id:`, `event:` e `retry:` não são usados: o `seq` dentro do
                 // JSON já é o cursor, e duplicá-lo em `id:` só criaria duas

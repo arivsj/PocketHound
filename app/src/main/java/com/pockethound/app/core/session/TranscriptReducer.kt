@@ -26,6 +26,13 @@ import com.pockethound.app.core.model.TurnKind
  * texto consolidado e **substitui** os deltas — assim o markdown final fica
  * certo, sem os cortes que a montagem por pedaços produz.
  *
+ * ## E o mesmo quadro duas vezes
+ *
+ * Todo item que nasce de um quadro tem **id derivado do quadro** (o `seq`, o
+ * `callId`, o turno e o passo), e um id que já está na conversa não entra de
+ * novo. É o que torna esta função segura para o reenvio pedido à mão: o PC
+ * devolve o buffer inteiro e só o que faltava muda a tela.
+ *
  * @param atual transcrição da sessão, já em ordem.
  * @param quadro quadro recebido do PC.
  * @return a transcrição nova, ou a mesma lista quando o quadro não muda a
@@ -50,11 +57,14 @@ object TranscriptReducer {
                 contexto = payload.reasoning?.takeIf { it.isNotBlank() },
             )
 
-            TurnKind.UserMessage -> atual + TurnItem(
-                id = "u-${quadro.seq}",
-                kind = TurnItemKind.UserMessage,
-                text = payload.text.orEmpty(),
-                timestamp = quadro.ts,
+            TurnKind.UserMessage -> juntar(
+                atual,
+                TurnItem(
+                    id = "u-${quadro.seq}",
+                    kind = TurnItemKind.UserMessage,
+                    text = payload.text.orEmpty(),
+                    timestamp = quadro.ts,
+                ),
             )
 
             // A chamada vira uma LINHA legivel, no formato do Harness: rotulo
@@ -63,18 +73,21 @@ object TranscriptReducer {
             // a frase que o modelo escreveu para ser lida.
             TurnKind.ToolCall -> {
                 val linha = ToolSummary.of(payload.name.orEmpty(), payload.args)
-                atual + TurnItem(
-                    id = "c-${payload.callId ?: quadro.seq}",
-                    kind = TurnItemKind.ToolCall,
-                    text = linha.subject,
-                    label = linha.label,
-                    subject = linha.subject,
-                    detail = ToolSummary.pretty(payload.args),
-                    toolName = payload.name,
-                    callId = payload.callId,
-                    timestamp = quadro.ts,
-                    turn = payload.turn,
-                    step = payload.step,
+                juntar(
+                    atual,
+                    TurnItem(
+                        id = "c-${payload.callId ?: quadro.seq}",
+                        kind = TurnItemKind.ToolCall,
+                        text = linha.subject,
+                        label = linha.label,
+                        subject = linha.subject,
+                        detail = ToolSummary.pretty(payload.args),
+                        toolName = payload.name,
+                        callId = payload.callId,
+                        timestamp = quadro.ts,
+                        turn = payload.turn,
+                        step = payload.step,
+                    ),
                 )
             }
 
@@ -86,21 +99,24 @@ object TranscriptReducer {
                     atual.lastOrNull { it.kind == TurnItemKind.ToolCall && it.callId == id }
                 }
                 val falhou = payload.isError == true
-                atual + TurnItem(
-                    id = "r-${payload.callId ?: quadro.seq}",
-                    kind = if (falhou) TurnItemKind.Error else TurnItemKind.ToolResult,
-                    text = ToolSummary.resultSubject(payload.text.orEmpty()),
-                    detail = payload.text.orEmpty(),
-                    // Sem a chamada (resultado orfao, replay cortado) o rotulo
-                    // generico ainda e melhor que uma linha sem nome nenhum.
-                    label = chamada?.label ?: ToolSummary.label(payload.name.orEmpty()),
-                    subject = chamada?.subject,
-                    toolName = chamada?.toolName ?: payload.name,
-                    callId = payload.callId,
-                    ok = !falhou,
-                    timestamp = quadro.ts,
-                    turn = payload.turn,
-                    step = payload.step,
+                juntar(
+                    atual,
+                    TurnItem(
+                        id = "r-${payload.callId ?: quadro.seq}",
+                        kind = if (falhou) TurnItemKind.Error else TurnItemKind.ToolResult,
+                        text = ToolSummary.resultSubject(payload.text.orEmpty()),
+                        detail = payload.text.orEmpty(),
+                        // Sem a chamada (resultado orfao, replay cortado) o rotulo
+                        // generico ainda e melhor que uma linha sem nome nenhum.
+                        label = chamada?.label ?: ToolSummary.label(payload.name.orEmpty()),
+                        subject = chamada?.subject,
+                        toolName = chamada?.toolName ?: payload.name,
+                        callId = payload.callId,
+                        ok = !falhou,
+                        timestamp = quadro.ts,
+                        turn = payload.turn,
+                        step = payload.step,
+                    ),
                 )
             }
 
@@ -113,6 +129,21 @@ object TranscriptReducer {
             else -> atual
         }
     }
+
+    /**
+     * Junta um item novo, sem repetir id.
+     *
+     * O reenvio que o botão "atualizar" pede (e a reconexão depois de um replay
+     * cortado) traz de volta quadros que já estão na conversa. Item repetido não
+     * é só feio: o id é a CHAVE de cada linha da lista, e chave repetida derruba
+     * a tela inteira.
+     *
+     * @param atual conversa antes do item.
+     * @param item item a juntar.
+     * @return a conversa com o item, ou a mesma lista quando ele já estava lá.
+     */
+    private fun juntar(atual: List<TurnItem>, item: TurnItem): List<TurnItem> =
+        if (atual.any { it.id == item.id }) atual else atual + item
 
     /** Continua o balão aberto do mesmo passo, ou abre um novo. */
     private fun acumular(
@@ -167,12 +198,15 @@ object TranscriptReducer {
                 it[indice] = it[indice].copy(text = texto, streaming = false)
             }
         } else {
-            restante + TurnItem(
-                id = "m-${turn}-${step}",
-                kind = TurnItemKind.AssistantMessage,
-                text = texto,
-                turn = turn,
-                step = step,
+            juntar(
+                restante,
+                TurnItem(
+                    id = "m-${turn}-${step}",
+                    kind = TurnItemKind.AssistantMessage,
+                    text = texto,
+                    turn = turn,
+                    step = step,
+                ),
             )
         }
 
@@ -196,7 +230,7 @@ object TranscriptReducer {
             turn = turn,
             step = step,
         )
-        if (posicao < 0) return consolidado + raciocinio
+        if (posicao < 0) return juntar(consolidado, raciocinio)
         return consolidado.toMutableList().also { it.add(posicao, raciocinio) }
     }
 }

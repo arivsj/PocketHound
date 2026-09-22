@@ -12,6 +12,7 @@ import com.pockethound.app.core.model.Session
 import com.pockethound.app.core.model.SessionSnapshot
 import com.pockethound.app.core.model.TurnItem
 import com.pockethound.app.core.model.Workspace
+import com.pockethound.app.core.session.EstadoDaAtualizacao
 import com.pockethound.app.core.session.PromptStatus
 import com.pockethound.app.core.transport.TransportMode
 import com.pockethound.app.core.session.PairingOutcome
@@ -108,6 +109,12 @@ class RootViewModel @Inject constructor(
     fun sendPrompt(text: String) = repository.sendPrompt(text)
 
     fun cancelTurn() = repository.cancelTurn()
+
+    /** O que houve com o último toque em "atualizar": a faixa do chat mostra. */
+    val atualizacao: StateFlow<EstadoDaAtualizacao> = repository.atualizacao
+
+    /** Pede ao PC o reenvio do que ele ainda guarda (o botão de atualizar). */
+    fun atualizar() = repository.atualizar()
 
     fun decide(requestId: String, allowed: Boolean, remember: Boolean = false) =
         repository.decide(requestId, allowed, remember)

@@ -34,8 +34,15 @@ class SseDecoderTest {
     }
 
     @Test
-    fun `batimento nao vira quadro`() {
-        assertEquals(0, decodificar(": beat", "", ": ping", "").size)
+    fun `batimento vira sinal de vida, nao em dado`() {
+        // O comentário do SSE não é dado — não entra em transcrição nenhuma — mas
+        // PRECISA chegar a quem mede silêncio: era descartado aqui dentro e uma
+        // conexão saudável e parada era derrubada por "45 s sem nada" e refeita
+        // de tempos em tempos.
+        val quadros = decodificar(": beat", "", ": ping", "")
+        assertEquals(2, quadros.size)
+        assertTrue("nada de conteúdo, só vida", quadros.all { it is IncomingFrame.Beat })
+        assertEquals("batimento não anda o cursor", 0L, quadros[0].seq)
     }
 
     @Test
@@ -51,7 +58,10 @@ class SseDecoderTest {
     fun `varios eventos na mesma leva saem em ordem`() {
         val segundo = """{"v":1,"seq":8,"ts":1,"type":"notice","payload":{"level":"info","title":"b"}}"""
         val quadros = decodificar("data: $quadro", "", ": beat", "", "data: $segundo", "")
-        assertEquals(listOf(7L, 8L), quadros.map { it.seq })
+        // O batimento no meio aparece na lista (é vida, não dado) e não desordena
+        // os quadros de verdade.
+        assertEquals(listOf(7L, 0L, 8L), quadros.map { it.seq })
+        assertEquals(2, quadros.count { it !is IncomingFrame.Beat })
     }
 
     @Test

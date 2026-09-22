@@ -28,7 +28,11 @@ import com.pockethound.app.core.model.SessionUpsertPayload
 import com.pockethound.app.core.model.TurnItem
 import com.pockethound.app.core.model.TurnItemKind
 import com.pockethound.app.core.model.Workspace
+import com.pockethound.app.core.session.CaudaDoReplay
 import com.pockethound.app.core.session.ConnectionStatus
+import com.pockethound.app.core.session.ContagemDaAtualizacao
+import com.pockethound.app.core.session.EstadoDaAtualizacao
+import com.pockethound.app.core.session.MarcaDoReplay
 import com.pockethound.app.core.session.PromptAck
 import com.pockethound.app.core.session.PromptStatus
 import com.pockethound.app.core.session.PromptWatchdog
@@ -37,6 +41,7 @@ import com.pockethound.app.core.session.SessionOrder
 import com.pockethound.app.core.session.TranscriptReducer
 import com.pockethound.app.core.session.TurnStatus
 import com.pockethound.app.core.session.TurnStatusReducer
+import java.util.concurrent.atomic.AtomicInteger
 import com.pockethound.app.core.storage.SecureStore
 import com.pockethound.app.core.storage.SettingsStorage
 import com.pockethound.app.core.transport.TransportMode
@@ -169,6 +174,65 @@ class HoundRepository @Inject constructor(
     private val watchdog = PromptWatchdog()
     private var vigia: Job? = null
 
+    /**
+     * O maior `seq` já dobrado na conversa.
+     *
+     * É o que permite pedir o reenvio do buffer do PC sem duplicar o que já está
+     * na tela: o que volta com número menor já passou por aqui.
+     */
+    private val marca = MarcaDoReplay()
+
+    /** Um reenvio pedido pelo botão "atualizar" está no ar? */
+    @Volatile
+    private var revalidando: Boolean = false
+
+    /** Tamanho de cada transcrição quando o reenvio foi pedido. */
+    private var antesDaAtualizacao: Map<String, Int> = emptyMap()
+
+    /**
+     * Quadros que voltaram no reenvio em curso.
+     *
+     * Atômico porque quem zera é a linha de comando da tela e quem soma é o
+     * coletor de quadros — dois fios diferentes.
+     */
+    private val reenviados = AtomicInteger(0)
+
+    /**
+     * Chegamos muito depois da conversa?
+     *
+     * Ligado quando o primeiro quadro de um replay está a mais de
+     * [SALTO_MAXIMO_QUADROS] do último que a tela tinha. Enquanto isso, o replay
+     * não vai para a tela: vai para [cauda], e só o fim dele entra.
+     */
+    private var recuperando: Boolean = false
+
+    /** Quando a recuperação em curso começou (ms). */
+    private var recuperacaoDesde: Long = 0L
+
+    /** Quando chegou o último quadro de conversa (ms) — o relógio da rajada. */
+    private var ultimoTurnoEm: Long = 0L
+
+    /**
+     * A transcrição da recuperação, por sessão — já cortada na cauda.
+     *
+     * Vive separada da transcrição da tela porque essa é a ÚNICA forma de mostrar
+     * o fim de um buraco grande sem mostrar o buraco inteiro.
+     */
+    private val cauda = mutableMapOf<String, List<TurnItem>>()
+
+    /**
+     * A transcrição como ela estava quando a recuperação começou, por sessão.
+     *
+     * É a base sobre a qual a cauda é desenhada. Congelada de propósito: se a
+     * base fosse a transcrição viva, cada linha que saísse da cauda continuaria
+     * na tela, e o buraco voltaria a crescer pelo outro lado.
+     */
+    private var antesDaRecuperacao: Map<String, List<TurnItem>> = emptyMap()
+
+    /** O que houve com o último toque em "atualizar". */
+    private val _atualizacao = MutableStateFlow(EstadoDaAtualizacao())
+    val atualizacao: StateFlow<EstadoDaAtualizacao> = _atualizacao.asStateFlow()
+
     val pairing: StateFlow<SessionSnapshot> = settingsStorage.session
         .stateIn(scope, SharingStarted.Eagerly, SessionSnapshot())
 
@@ -197,6 +261,34 @@ class HoundRepository @Inject constructor(
 
     /** Dobra um quadro do PC no estado da tela. */
     private fun aplicar(quadro: IncomingFrame) {
+        // Reenvio pedido à mão: o PC devolve o buffer inteiro, do começo, e a
+        // maior parte dele já está na tela. Um quadro com número menor que a
+        // marca já passou por aqui — dobrá-lo de novo duplicaria a conversa, e
+        // a marca é o único juiz disso porque o `seq` nasce no PC, não aqui.
+        //
+        // A checagem vem ANTES de tudo de propósito: um `turn.start` antigo
+        // dobrado de novo deixaria a sessão "trabalhando" para sempre, e um
+        // `session.upsert` velho desfaria o que chegou depois.
+        val agora = System.currentTimeMillis()
+
+        // O fim da recuperação NÃO pode depender de um quadro só. O PC descarta o
+        // `replay.done` quando o celular está para trás — ele é "substituível" na
+        // contrapressão do rádio, e um replay grande é exatamente quando ele é
+        // descartado. Preso esperando um quadro que nunca vem, o app engolia tudo
+        // em silêncio: foi o sintoma de 22/set, "as mensagens não chegam".
+        if (recuperando && recuperacaoAcabou(quadro, agora)) encerrarRecuperacao()
+
+        if (quadro.seq > 0L) {
+            if (revalidando) reenviados.incrementAndGet()
+            if (!marca.aceita(quadro.seq)) return
+            // Chegou MUITO depois do que estava na tela: o que vem agora é o
+            // replay de um buraco grande, e buraco grande é história, não notícia.
+            // A medida é feita ANTES de marcar, contra o que a tela já tinha.
+            if (!revalidando && quadro.seq - marca.ultimo > SALTO_MAXIMO_QUADROS) {
+                comecarRecuperacao(agora)
+            }
+            marca.marcou(quadro.seq)
+        }
         when (quadro) {
             is IncomingFrame.SessionUpsert -> {
                 val sessao = quadro.payload.paraSessao()
@@ -223,6 +315,9 @@ class HoundRepository @Inject constructor(
                 _sessions.value = _sessions.value.filterNot { it.id == id }
                 _transcript.update { atual -> atual - id }
                 _turnStatus.update { atual -> atual - id }
+                // A sessão morreu; a cauda dela (se havia uma recuperação em
+                // curso) não pode ressuscitar na hora de juntar.
+                cauda.remove(id)
                 if (_activeSessionId.value == id) {
                     // A sessao escolhida sumiu: volta a escolher sozinho, senao o
                     // destino fica apontando para o vazio.
@@ -233,6 +328,29 @@ class HoundRepository @Inject constructor(
 
             is IncomingFrame.TurnEvent -> {
                 val id = quadro.session ?: _activeSessionId.value ?: return
+                if (recuperando) {
+                    ultimoTurnoEm = agora
+                    // O replay grande vai para uma transcrição SEPARADA, e só a
+                    // cauda dela é que aparece. Despejar horas de conversa antiga
+                    // na frente de quem abriu o app é o oposto de mostrar o
+                    // presente.
+                    //
+                    // E a cauda entra na TELA na hora, a cada quadro — não no fim
+                    // do replay. O fim pode nunca ser anunciado (o `replay.done` é
+                    // descartável na contrapressão), e esperar por ele deixava a
+                    // tela muda com o agente trabalhando.
+                    val comCauda = CaudaDoReplay.cortar(
+                        TranscriptReducer.reduce(cauda[id].orEmpty(), quadro),
+                    )
+                    cauda[id] = comCauda
+                    // A base é a transcrição CONGELADA de quando a recuperação
+                    // começou: é o que impede o buraco de voltar a crescer na tela
+                    // conforme a cauda anda.
+                    _transcript.update { atual ->
+                        atual + (id to juntarSemRepetir(antesDaRecuperacao[id].orEmpty(), comCauda))
+                    }
+                    return
+                }
                 _transcript.update { atual ->
                     atual + (id to TranscriptReducer.reduce(atual[id].orEmpty(), quadro))
                 }
@@ -272,9 +390,21 @@ class HoundRepository @Inject constructor(
             }
 
             is IncomingFrame.ReplayDone -> {
-                // O fluxo terminou de sincronizar: e a hora de pedir o que so o PC
-                // sabe — a lista de workspaces, que da o "onde trabalhar".
-                pedirWorkspaces()
+                // Só o do DESK fecha o replay, e ele vem sem número (`seq == 0`).
+                // O do plugin vem numerado e está DENTRO do anel: num replay grande
+                // ele chega no meio, contando uma história velha — tratá-lo como
+                // fim cortaria a recuperação pela metade.
+                if (quadro.seq != 0L) return
+                if (recuperando) encerrarRecuperacao()
+                // Numa atualização pedida pelo usuário, é aqui que ela acaba: o PC
+                // já reenviou o que tinha e a cortina fecha.
+                if (revalidando) {
+                    concluirAtualizacao()
+                } else {
+                    // No caminho normal, é a hora de pedir o que só o PC sabe — a
+                    // lista de workspaces, que dá o "onde trabalhar".
+                    pedirWorkspaces()
+                }
             }
 
             is IncomingFrame.DeskState -> {
@@ -424,6 +554,133 @@ class HoundRepository @Inject constructor(
                     avisar(NoticeLevel.Warn, "Sem contato com o PC", "O prompt não foi entregue.")
             }
         }
+    }
+
+    /**
+     * Pede ao PC o reenvio do que ele ainda guarda e dobra só o que faltava.
+     *
+     * ## Por que isto existe
+     *
+     * A conversa do celular é montada a partir do fluxo ao vivo: o que não
+     * chega, não existe. E o que não chega tem várias causas — a rede troca de
+     * torre, o aplicativo fica suspenso em segundo plano, o rádio entope e o PC
+     * descarta o delta, ou o pedaço do buffer que o celular queria já tinha sido
+     * jogado fora quando ele voltou. Em todos esses casos a tela fica **velha e
+     * muda**, e velha e muda é indistinguível de "o agente parou de escrever".
+     *
+     * O PC guarda os últimos milhares de quadros para o replay de reconexão —
+     * ele faz isso para TODOS os celulares, conectados ou não. Este é o mesmo
+     * replay, pedido na hora em que o humano desconfia da tela.
+     */
+    fun atualizar() {
+        if (_atualizacao.value.emCurso) return
+
+        antesDaAtualizacao = tamanhos()
+        reenviados.set(0)
+        revalidando = true
+        _atualizacao.value = EstadoDaAtualizacao(pedida = true, emCurso = true)
+
+        // Cursor 0 = o começo do que o PC ainda tem. "Do último que vi" não
+        // serve para o que este botão existe: é justamente o buraco no meio da
+        // conversa que se quer fechar.
+        sessionClient.resync(0L)
+
+        // O fim do reenvio é anunciado pelo PC (`replay.done`). Quando ele não
+        // vem — PC fora do ar, caminho caído —, o prazo fecha a cortina: rodinha
+        // girando para sempre é pior que dizer que não deu.
+        scope.launch {
+            delay(PRAZO_ATUALIZACAO_MS)
+            if (revalidando) concluirAtualizacao("o PC não confirmou o fim do reenvio")
+        }
+    }
+
+    /**
+     * Fecha a atualização em curso e conta o que ela trouxe.
+     *
+     * @param motivo o que impediu a confirmação do PC, quando houve.
+     */
+    private fun concluirAtualizacao(motivo: String? = null) {
+        revalidando = false
+        _atualizacao.value = EstadoDaAtualizacao(
+            pedida = true,
+            emCurso = false,
+            novidades = ContagemDaAtualizacao.novidades(antesDaAtualizacao, tamanhos()),
+            reenviados = reenviados.get(),
+            quandoMs = System.currentTimeMillis(),
+            motivo = motivo,
+        )
+    }
+
+    /** Quantas linhas cada conversa tem agora. */
+    private fun tamanhos(): Map<String, Int> = _transcript.value.mapValues { it.value.size }
+
+    /**
+     * Começa uma recuperação a partir de [agora].
+     *
+     * @param agora instante da decisão.
+     */
+    private fun comecarRecuperacao(agora: Long) {
+        recuperando = true
+        recuperacaoDesde = agora
+        ultimoTurnoEm = agora
+        cauda.clear()
+        antesDaRecuperacao = _transcript.value
+    }
+
+    /**
+     * A recuperação acabou?
+     *
+     * Três caminhos, porque um só não basta:
+     *
+     * 1. o `replay.done` do desk (`seq == 0`), quando ele chega;
+     * 2. um silêncio depois da rajada — o replay é um jorro contínuo, o fluxo
+     *    normal tem pausas;
+     * 3. um teto de tempo, para o caso de nenhum dos dois acontecer.
+     *
+     * @param quadro quadro que chegou agora.
+     * @param agora instante da chegada.
+     */
+    private fun recuperacaoAcabou(quadro: IncomingFrame, agora: Long): Boolean {
+        if (quadro is IncomingFrame.ReplayDone && quadro.seq == 0L) return true
+        if (agora - recuperacaoDesde > RECUPERACAO_MAXIMA_MS) return true
+        return agora - ultimoTurnoEm > RECUPERACAO_OCIOSA_MS
+    }
+
+    /**
+     * Fecha a recuperação.
+     *
+     * Não há nada para "aplicar" aqui: a cauda já está na tela desde o primeiro
+     * quadro (ver `aplicar`). O que se faz é parar de podar.
+     */
+    private fun encerrarRecuperacao() {
+        val tinhaCauda = cauda.isNotEmpty()
+        recuperando = false
+        cauda.clear()
+        antesDaRecuperacao = emptyMap()
+        if (!tinhaCauda) return
+        avisar(
+            NoticeLevel.Info,
+            "Chegou atrasado",
+            "Só o fim da conversa entrou na tela (as últimas " + CaudaDoReplay.MENSAGENS +
+                " mensagens). O que passou antes disso já era.",
+        )
+    }
+
+
+    /**
+     * Junta linhas novas no fim, sem repetir id.
+     *
+     * A cauda pode trazer de volta um quadro que já estava na tela (o replay
+     * sempre começa antes do fim); id repetido é chave repetida na lista, e isso
+     * derruba a tela inteira.
+     *
+     * @param atual transcrição da sessão.
+     * @param novos linhas a acrescentar, em ordem.
+     */
+    private fun juntarSemRepetir(atual: List<TurnItem>, novos: List<TurnItem>): List<TurnItem> {
+        val conhecidos = atual.mapTo(mutableSetOf()) { it.id }
+        val acrescentar = novos.filter { conhecidos.add(it.id) }
+        return if (acrescentar.isEmpty()) atual else atual + acrescentar
     }
 
     /** Pede ao PC a lista de workspaces do Harness. */
@@ -597,6 +854,15 @@ class HoundRepository @Inject constructor(
         _activeSessionId.value = null
         _escolhaManual.value = false
         _promptStatus.value = watchdog.clear()
+        _atualizacao.value = EstadoDaAtualizacao()
+        revalidando = false
+        reenviados.set(0)
+        antesDaAtualizacao = emptyMap()
+        recuperando = false
+        cauda.clear()
+        // Sem pareamento não há PC para reenviar nada: a marca d'água também cai,
+        // senão a conversa do próximo PC nasceria com quadros "já vistos".
+        marca.limpar()
         vigia?.cancel()
         vigia = null
     }
@@ -657,6 +923,39 @@ class HoundRepository @Inject constructor(
     companion object {
         /** De quanto em quanto tempo o vigia reavalia o prazo. */
         const val PASSO_VIGIA_MS = 5_000L
+
+        /**
+         * A partir de quantos quadros de distância o atraso vira "cheguei tarde".
+         *
+         * Abaixo disso o replay é uma queda de rede comum e entra inteiro: perder
+         * as últimas mensagens por causa de um soluço de dois segundos seria pior
+         * que o problema que o corte resolve.
+         */
+        const val SALTO_MAXIMO_QUADROS = 200L
+
+        /**
+         * Silêncio, no meio de uma recuperação, que significa "a rajada acabou".
+         *
+         * O replay chega como um jorro contínuo; o fluxo normal tem pausas — e o
+         * desk manda `desk.state` a cada 2 s, então a pausa é fácil de medir.
+         */
+        const val RECUPERACAO_OCIOSA_MS = 6_000L
+
+        /**
+         * Teto absoluto de uma recuperação.
+         *
+         * Rede móvel ruim pode picar a rajada em pedaços com mais de 6 s entre
+         * eles; sem este teto o app ficaria podando para sempre.
+         */
+        const val RECUPERACAO_MAXIMA_MS = 30_000L
+
+        /**
+         * Quanto esperar pelo fim do reenvio antes de dizer que não deu.
+         *
+         * Folgado de propósito: o PC reenvia até alguns milhares de quadros, e
+         * numa rede móvel isso não sai em segundos.
+         */
+        const val PRAZO_ATUALIZACAO_MS = 25_000L
     }
 
     private fun avisar(nivel: String, titulo: String, corpo: String) {

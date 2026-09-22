@@ -6,6 +6,7 @@ import com.pockethound.app.core.model.PhCodec
 import com.pockethound.app.core.model.PingPayload
 import com.pockethound.app.core.storage.SecureStore
 import com.pockethound.app.core.storage.SettingsStorage
+import com.pockethound.app.core.transport.LanBeacon
 import com.pockethound.app.core.transport.SelectedTransport
 import com.pockethound.app.core.transport.TransportMode
 import com.pockethound.app.core.transport.TransportRequest
@@ -14,8 +15,10 @@ import com.pockethound.app.core.transport.TransportSelector
 import io.ktor.client.HttpClient
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -68,6 +71,7 @@ class SessionClient @Inject constructor(
     private val secureStore: SecureStore,
     private val client: HttpClient,
     private val selector: TransportSelector,
+    private val lanBeacon: LanBeacon,
 ) {
     private val _state = MutableStateFlow(ConnectionState())
     val state: StateFlow<ConnectionState> = _state.asStateFlow()
@@ -79,6 +83,21 @@ class SessionClient @Inject constructor(
 
     private var loop: Job? = null
 
+    /** O fluxo aberto agora. O pedido de atualização derruba só ele. */
+    @Volatile
+    private var stream: Job? = null
+
+    /**
+     * Cursor pedido para a PRÓXIMA conexão, quando alguém quer rever o passado.
+     *
+     * Nulo no caminho normal: aí quem manda é o último `seq` processado.
+     */
+    @Volatile
+    private var replayDe: Long? = null
+
+    /** Quando o cursor foi para o disco pela última vez. */
+    private var cursorGuardadoEm: Long = 0L
+
     /**
      * Liga o laço de conexão. Idempotente: chamar duas vezes não abre dois laços.
      *
@@ -86,11 +105,38 @@ class SessionClient @Inject constructor(
      */
     fun start(scope: CoroutineScope) {
         if (loop?.isActive == true) return
+        // O farol sobe junto: ele não é um caminho, é o que diz QUAL é o
+        // endereço do PC agora. Sem ele, o app só sabe o endereço que ficou
+        // gravado no pareamento — e esse envelhece sem avisar.
+        lanBeacon.start(scope)
         loop = scope.launch { executar() }
+    }
+
+    /**
+     * Pede ao PC o reenvio a partir de [from] e derruba o fluxo atual.
+     *
+     * ## Por que derrubar o fluxo, e não abrir um segundo
+     *
+     * Dois fluxos do MESMO aparelho não convivem: o PC derruba o antigo quando
+     * o novo chega (é assim que ele não acumula conexões mortas). Abrir um
+     * segundo para ler o passado mataria o fluxo ao vivo. Então a atualização é
+     * uma reconexão — a mesma que já existe para quando a rede cai, só que com
+     * um cursor escolhido a dedo.
+     *
+     * `from = 0` quer dizer "do começo do que o PC ainda guarda". Pedir do
+     * último `seq` visto não serve para o que este botão existe: é justamente o
+     * buraco no meio da conversa que se quer fechar.
+     *
+     * @param from cursor do reenvio; 0 = o mais antigo que o PC ainda tem.
+     */
+    fun resync(from: Long = 0L) {
+        replayDe = from.coerceAtLeast(0L)
+        stream?.cancel()
     }
 
     /** Derruba o laço e marca offline. */
     fun stop() {
+        lanBeacon.stop()
         loop?.cancel()
         loop = null
         _state.value = _state.value.copy(status = ConnectionStatus.Offline)
@@ -135,54 +181,124 @@ class SessionClient @Inject constructor(
             atraso = ATRASO_MINIMO_MS
             _state.value = _state.value.copy(status = ConnectionStatus.Online, reason = null)
 
-            // Ping de vida enquanto o fluxo estiver aberto.
-            //
-            // Serve a dois propositos: o desk fica sabendo que este aparelho esta
-            // vivo (e pode largar conexoes velhas com seguranca), e o pong que
-            // volta mantem o fluxo com sinal mesmo quando a sessao esta parada.
-            coroutineScope {
-            val batimento = launch {
-                while (isActive) {
-                    delay(PING_MS)
-                    selecionado.transport.request(
-                        TransportRequest(FrameType.Ping, PhCodec.payloadOf(PingPayload(echo = "vivo"))),
-                    )
-                }
-            }
+            // O cursor DESTA conexão. Um pedido de atualização manda mais que o
+            // último `seq` visto: é ele que traz de volta o que a tela perdeu.
+            val cursor = replayDe?.also { replayDe = null } ?: _state.value.cursor
 
             try {
-                selecionado.transport
-                    .events(_state.value.cursor)
-                    // SEM SINAL por muito tempo = conexao morta. Rede movel troca de
-                    // torre, NAT expira, o socket vira zumbi — e sem esta linha o app
-                    // fica pendurado esperando bytes que nunca vem, com "ao vivo" na
-                    // tela. O PC manda um batimento a cada 15 s, entao 45 s de
-                    // silencio e definitivo. Antes disso, so reiniciar o app resolvia.
-                    .timeout(SILENCIO_MAXIMO_MS.milliseconds)
-                    .collect { quadro ->
-                    // `seq == 0` é quadro efêmero do PC (estado da máquina, aviso):
-                    // não faz parte da linha do tempo e NÃO pode avançar o cursor,
-                    // senão o replay pediria um buraco que não existe.
-                    if (quadro.seq > 0L) {
-                        _state.value = _state.value.copy(cursor = quadro.seq)
-                        settingsStorage.updateLastSeq(quadro.seq)
+                coroutineScope {
+                    // Ping de vida enquanto o fluxo estiver aberto.
+                    //
+                    // Serve a dois propositos: o desk fica sabendo que este aparelho
+                    // esta vivo (e pode largar conexoes velhas com seguranca), e o
+                    // pong que volta mantem o fluxo com sinal mesmo quando a sessao
+                    // esta parada.
+                    val batimento = launch {
+                        while (isActive) {
+                            delay(PING_MS)
+                            selecionado.transport.request(
+                                TransportRequest(FrameType.Ping, PhCodec.payloadOf(PingPayload(echo = "vivo"))),
+                            )
+                        }
                     }
-                    _frames.emit(quadro)
+
+                    try {
+                        // O fluxo vive num Job proprio: é ele que o pedido de
+                        // atualização derruba, sem levar junto o laço de reconexão.
+                        val fluxo = launch {
+                            selecionado.transport
+                                .events(cursor)
+                                // SEM SINAL por muito tempo = conexao morta. Rede movel
+                                // troca de torre, NAT expira, o socket vira zumbi — e sem
+                                // esta linha o app fica pendurado esperando bytes que nunca
+                                // vem, com "ao vivo" na tela. O PC manda um batimento a cada
+                                // 15 s, entao 45 s de silencio e definitivo. Antes disso, so
+                                // reiniciar o app resolvia.
+                                .timeout(SILENCIO_MAXIMO_MS.milliseconds)
+                                .collect { quadro -> receber(quadro) }
+                        }
+                        stream = fluxo
+                        // O pedido pode ter chegado durante o handshake, quando
+                        // ainda não havia fluxo para derrubar. Sem esta linha ele
+                        // esperaria a conexão cair sozinha para valer.
+                        if (replayDe != null) fluxo.cancel()
+                        fluxo.join()
+                    } finally {
+                        // Fecha o batimento JUNTO com o fluxo: sem isto, um laco de
+                        // reconexao deixaria um ping por tentativa, e o desk veria um
+                        // aparelho falante e nenhuma conexao.
+                        batimento.cancel()
+                        stream = null
+                    }
                 }
+            } catch (cancelado: CancellationException) {
+                // Cuidado com esta exceção: ela chega aqui por DOIS motivos que
+                // pedem coisas opostas. `stop()` cancela este laço de fora, e aí
+                // ele deve mesmo morrer. Já o prazo de silêncio
+                // (TimeoutCancellationException, que TAMBÉM é uma
+                // CancellationException) é justamente o que manda reconectar.
+                // Rethrowar os dois mataria a conexão para sempre na primeira
+                // rede ruim — o defeito que este app mais teme.
+                if (!currentCoroutineContext().isActive) throw cancelado
+                perdeuOCaminho("silêncio")
             } catch (erro: Throwable) {
-                _state.value = _state.value.copy(
-                    status = ConnectionStatus.Reconectando,
-                    reason = erro::class.simpleName,
-                )
-            } finally {
-                // Fecha o batimento JUNTO com o fluxo: sem isto, um laco de
-                // reconexao deixaria um ping por tentativa, e o desk veria um
-                // aparelho falante e nenhuma conexao.
-                batimento.cancel()
-            }
+                perdeuOCaminho(erro::class.simpleName)
             }
             delay(ATRASO_MINIMO_MS)
         }
+    }
+
+    /**
+     * O fluxo caiu: marca "reconectando" e esquece o caminho escolhido.
+     *
+     * Esquecer é o ponto. A escolha entre direto e P2P vale um minuto, e ela só
+     * é refeita quando expira. Se a rede mudou enquanto o fluxo estava de pé —
+     * o caso clássico: o celular saiu do Wi-Fi e entrou no 4G —, insistir no
+     * caminho velho custa dezenas de segundos de tela parada antes de alguém
+     * sondar de novo.
+     *
+     * @param motivo o que derrubou o fluxo, para a tela contar.
+     */
+    private fun perdeuOCaminho(motivo: String?) {
+        selector.invalidar()
+        _state.value = _state.value.copy(status = ConnectionStatus.Reconectando, reason = motivo)
+    }
+
+    /**
+     * Um quadro chegou: anda o cursor e entrega a quem desenha a tela.
+     *
+     * @param quadro quadro já decodificado.
+     */
+    private suspend fun receber(quadro: IncomingFrame) {
+        // `seq == 0` é quadro efêmero do PC (estado da máquina, aviso): não faz
+        // parte da linha do tempo e NÃO pode avançar o cursor, senão o replay
+        // pediria um buraco que não existe.
+        //
+        // E o cursor só ANDA PARA A FRENTE: durante um reenvio pedido à mão
+        // chegam quadros antigos, e deixá-los puxar o cursor para trás faria a
+        // próxima reconexão pedir de novo o que já está na tela.
+        if (quadro.seq > _state.value.cursor) {
+            _state.value = _state.value.copy(cursor = quadro.seq)
+            guardarCursor(quadro.seq)
+        }
+        _frames.emit(quadro)
+    }
+
+    /**
+     * Guarda o cursor no disco, com folga entre uma escrita e a seguinte.
+     *
+     * O fluxo entrega dezenas de quadros por segundo, e uma ida ao disco por
+     * quadro é trabalho jogado fora: o valor não é lido na abertura do app (o
+     * replay começa do zero e é o buffer do PC que reconstrói a tela). Ele fica
+     * para diagnóstico — e para o dia em que o app puder voltar de onde parou.
+     *
+     * @param seq cursor a guardar.
+     */
+    private suspend fun guardarCursor(seq: Long) {
+        val agora = System.currentTimeMillis()
+        if (agora - cursorGuardadoEm < INTERVALO_CURSOR_MS) return
+        cursorGuardadoEm = agora
+        settingsStorage.updateLastSeq(seq)
     }
 
     /**
@@ -220,5 +336,8 @@ class SessionClient @Inject constructor(
 
         /** De quanto em quanto o app avisa que esta vivo. */
         const val PING_MS = 25_000L
+
+        /** Folga entre duas gravações do cursor no disco. */
+        const val INTERVALO_CURSOR_MS = 5_000L
     }
 }

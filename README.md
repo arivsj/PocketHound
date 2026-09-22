@@ -162,15 +162,75 @@ Hilt 2.57.1 · Ktor 3.0.3 · compileSdk/targetSdk 36 · minSdk 26.
   `ui/approvals`): o cartão diz se o comando **saiu** ("enviando ao PC…", "comando
   entregue ao PC em 120 ms"), ou por que **não saiu** (HTTP, sem contato). Sem
   isso, "toquei e nada mudou" é indistinguível de "o comando nem saiu do aparelho".
+- **Descoberta na rede local** (`core/transport/LanBeacon.kt`): o PC **já**
+  gritava o endereço dele na porta UDP 7412 a cada 3 s — faltava alguém
+  escutando. O app agora escuta, valida (serviço, versão, porta plausível) e só
+  segue o farol de um PC **que conhece este aparelho**: a lista `dev` do anúncio
+  (prova forte, porque o id do aparelho não viaja em anúncio nenhum) ou, num desk
+  antigo que ainda não manda a lista, o nome com que ele foi pareado. Era isso
+  que faltava para "estou em casa, na mesma rede" voltar a conectar depois de o
+  DHCP trocar o IP do PC — e por que a decisão de confiar é uma função pura
+  testada (`Farol.confiavel`), não um `if` no laço do soquete: seguir um farol é
+  escolher para quem mandar o token. O caminho aparece como `lan` na Frota.
 - **Repositório ligado** (`data/repo/HoundRepository.kt`): dobra os quadros do
   `SessionClient` em `sessions`, `transcript`, `approvals`, `deskState`,
   `notices` e `promptStatus`. O estado começa **vazio**, não com exemplo — dado
   de exemplo numa tela que deveria mostrar o PC é pior que tela vazia.
-- **Testes** de JVM (**96**, todos passando): `ContractTest`, `SseDecoderTest`,
-  `TranscriptReducerTest`, `TranscriptRowsTest`, `P2pFramingTest`, `FramesTest`,
+- **Botão de atualizar a conversa** (`data/repo/HoundRepository.kt` +
+  `core/session/MarcaDoReplay.kt` + `ui/chat/ChatScreen.kt`): a conversa do
+  celular é montada do fluxo ao vivo, e o fluxo perde pedaços — a rede troca de
+  torre, o app é suspenso, o rádio entope e o PC descarta um delta. Quando isso
+  acontece a tela fica **velha e muda**, indistinguível de "o agente parou". O ↻
+  da barra do chat pede ao PC o reenvio do buffer dele (o mesmo replay da
+  reconexão, que ele guarda para todos os aparelhos) e dobra só o que faltava:
+  uma marca d'água de `seq` diz o que já passou e um `juntar` no redutor nunca
+  repete id — item repetido derrubaria a lista, porque o id é a chave de cada
+  linha. A faixa acima do composer conta o que voltou ("4 novidades", "nada
+  novo", "não deu para confirmar: …").
+- **Chegou atrasado? Só o fim entra** (`core/session/CaudaDoReplay.kt` +
+  `data/repo/HoundRepository.kt`): quando o app volta depois de um tempo fora, o
+  PC reenvia o buffer dele — horas de conversa. Despejar isso na tela é errado de
+  um jeito que se sente: a conversa enche de coisa velha e o que interessa afunda.
+  A regra é a do usuário: **se não viu, já foi**. O replay grande vai para uma
+  transcrição à parte, e no fim só a **cauda** entra na tela — as últimas 10
+  mensagens de conversa, com os passos que vieram depois da mais antiga delas, e
+  um teto de 60 linhas para um turno gigante de ferramentas não virar o mesmo
+  despejo. Queda de rede comum (menos de 200 quadros de distância) não corta
+  nada: perder as últimas mensagens por um soluço de dois segundos seria pior que
+  o problema. O que já estava na tela **fica** — o corte é do que chegou agora.
+  Um aviso na Frota explica por que a conversa não tem tudo.
+
+  **A cauda aparece a cada quadro, não no fim do replay** — e o fim da
+  recuperação tem três caminhos (o `replay.done` do PC, um silêncio de 6 s depois
+  da rajada, ou um teto de 30 s). Isso não é zelo: a primeira versão esperava só
+  o `replay.done`, e o PC **descarta** esse quadro quando o celular está para trás
+  (ele estava na lista de "substituíveis" da contrapressão) — ou seja, justamente
+  num replay grande. Preso, o app engolia tudo em silêncio: a tela dizia "sem
+  transcrição ainda" com o agente trabalhando. A lição ficou no código dos dois
+  lados: no PC, `replay.done` saiu da lista de descartáveis; no app, nada de
+  controle pode depender de **um** quadro só.
+
+  **E o replay tem teto na origem**: o app pede `/ph/stream?cursor=N&tail=400`, e
+  o PC manda no máximo os últimos 400 quadros do buraco. Sem isso, voltar depois
+  de um tempo fora empurrava ~700 KB (o anel inteiro, 4 000 quadros) pelo rádio
+  antes de a primeira mensagem nova aparecer — e o que interessa está no fim
+  dessa fila. O cursor anda do mesmo jeito, então o app não fica devendo nada; um
+  PC que ainda não conhece o parâmetro continua mandando tudo.
+- **Reconexão que volta sozinha** (`core/session/SessionClient.kt` +
+  `core/transport/P2pTransport.kt` + `core/transport/Sse.kt`): quatro defeitos
+  que faziam a conexão cair e não voltar — (1) o prazo de silêncio chegava como
+  `CancellationException` e matava o laço de reconexão; (2) o batimento do PC era
+  descartado no decodificador e uma conexão saudável **e ociosa** era derrubada a
+  cada 45 s; (3) a escolha direto/P2P ficava em cache por 1 min depois de a rede
+  mudar; (4) uma conexão QUIC zumbi era reaproveitada e pendurava o pedido por até
+  3 minutos — agora o fluxo descarta a conexão ao terminar e um comando repetível
+  ganha uma segunda tentativa com handshake novo.
+- **Testes** de JVM (**128**, todos passando): `ContractTest`, `SseDecoderTest`,
+  `TranscriptReducerTest`, `TranscriptRowsTest`, `AtualizacaoTest`,
+  `CaudaDoReplayTest`, `LanBeaconTest`, `P2pFramingTest`, `FramesTest`,
   `PairingPayloadTest`, `QrDecodeTest`, `PromptWatchdogTest`, `SessionOrderTest`,
-  `ToolSummaryTest` e `TurnStatusTest`. Mais o `P2pTunnelTest`, que roda **no
-  aparelho** — ver abaixo.
+  `ToolSummaryTest` e `TurnStatusTest`.
+  Mais o `P2pTunnelTest`, que roda **no aparelho** — ver abaixo.
 
 ## O teste que liga as duas pontas
 

@@ -264,7 +264,23 @@ fun PhCard(
 
 enum class PhButtonVariant { Primary, Danger, Ghost }
 
-/** Botões .ph-btn / --danger / --ghost (DESIGN.md §5.4). */
+/**
+ * Botões .ph-btn / --danger / --ghost (DESIGN.md §5.4).
+ *
+ * Com [text] vazio o botão fica só com o ícone — é o caso do "atualizar" da
+ * barra do chat, onde três rótulos não cabem na largura de um celular. Quem
+ * usa assim PRECISA passar [description]: sem ela o ícone não tem nome nenhum
+ * para quem lê a tela por um leitor.
+ *
+ * @param text rótulo; vazio deixa só o ícone.
+ * @param onClick toque.
+ * @param modifier modificador de layout.
+ * @param variant cor e forma do botão.
+ * @param enabled se responde ao toque.
+ * @param loading troca o ícone pela rodinha e trava o toque.
+ * @param icon ícone opcional.
+ * @param description nome do ícone para acessibilidade.
+ */
 @Composable
 fun PhButton(
     text: String,
@@ -274,6 +290,7 @@ fun PhButton(
     enabled: Boolean = true,
     loading: Boolean = false,
     icon: ImageVector? = null,
+    description: String? = null,
 ) {
     val interaction = remember { MutableInteractionSource() }
     val active = enabled && !loading
@@ -291,17 +308,19 @@ fun PhButton(
                 strokeWidth = 2.dp,
                 color = tone,
             )
-            Spacer(Modifier.width(10.dp))
+            if (text.isNotBlank()) Spacer(Modifier.width(10.dp))
         } else if (icon != null) {
             Icon(
                 imageVector = icon,
-                contentDescription = null,
+                contentDescription = description,
                 tint = tone,
                 modifier = Modifier.size(16.dp),
             )
-            Spacer(Modifier.width(8.dp))
+            if (text.isNotBlank()) Spacer(Modifier.width(8.dp))
         }
-        Text(text = text.uppercase(), style = MaterialTheme.typography.labelLarge, color = tone)
+        if (text.isNotBlank()) {
+            Text(text = text.uppercase(), style = MaterialTheme.typography.labelLarge, color = tone)
+        }
     }
 
     when (variant) {

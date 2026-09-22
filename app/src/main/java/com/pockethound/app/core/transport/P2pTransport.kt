@@ -1,5 +1,6 @@
 package com.pockethound.app.core.transport
 
+import com.pockethound.app.core.model.FrameType
 import com.pockethound.app.core.model.IncomingFrame
 import com.pockethound.app.core.model.PhCodec
 import com.pockethound.app.core.storage.SecureStore
@@ -136,6 +137,13 @@ class P2pTransport(
     private val json: Json,
 ) : Transport {
 
+    /**
+     * Conexão reaproveitada entre pedidos.
+     *
+     * `@Volatile` porque quem a descarta pode ser o fluxo do SSE (noutro fio)
+     * enquanto um comando está saindo.
+     */
+    @Volatile
     private var conexao: Connection? = null
 
     private suspend fun conectar(): Connection {
@@ -203,10 +211,39 @@ class P2pTransport(
         }
     }
 
+    /**
+     * Um comando pelo tunel, com uma segunda chance quando a conexao estava
+     * sendo reaproveitada.
+     *
+     * O prazo e CURTO nesse caso (ver [ATTEMPT_TIMEOUT_MS]): uma conexao "morta
+     * mas aberta" — o celular trocou de rede e o QUIC ainda nao percebeu — faz o
+     * pedido ficar pendurado. Com o prazo curto ele cai rapido, a conexao e
+     * descartada e a segunda tentativa faz um handshake novo. Sem isto o app
+     * ficava ate tres minutos parado antes de alguem reagir.
+     *
+     * A segunda tentativa e so para quadro REPETIVEL. Repetir um prompt ou a
+     * criacao de uma sessao faria um segundo trabalho de verdade quando o
+     * problema fosse apenas a resposta perdida no caminho.
+     */
     override suspend fun request(call: TransportRequest): TransportResult {
+        val reusando = conexao != null
+        val primeira = tentarEnviar(call, if (reusando) ATTEMPT_TIMEOUT_MS else REQUEST_TIMEOUT_MS)
+        val morreuDePrazo = primeira is TransportResult.NetworkError &&
+            primeira.cause is TimeoutCancellationException
+        if (!reusando || !morreuDePrazo || !repetivel(call.type)) return primeira
+        return tentarEnviar(call, REQUEST_TIMEOUT_MS)
+    }
+
+    /**
+     * Um envio, com prazo. Falha de qualquer tipo descarta a conexao.
+     *
+     * @param call comando a enviar.
+     * @param prazoMs quanto esperar antes de desistir.
+     */
+    private suspend fun tentarEnviar(call: TransportRequest, prazoMs: Long): TransportResult {
         val iniciado = System.currentTimeMillis()
         return try {
-            val resposta = withTimeout(REQUEST_TIMEOUT_MS) {
+            val resposta = withTimeout(prazoMs) {
                 val conn = conectar()
                 val bi = conn.openBi()
                 // O enquadramento recebe BYTES; o JSON sai como String.
@@ -220,6 +257,11 @@ class P2pTransport(
             } else {
                 TransportResult.HttpError(resposta.status, resposta.body?.toString()?.take(300) ?: "")
             }
+        } catch (prazo: TimeoutCancellationException) {
+            // ANTES do catch geral de cancelamento: este prazo e DAQUI, nao um
+            // cancelamento de quem chamou.
+            conexao = null
+            TransportResult.NetworkError(prazo)
         } catch (cancelado: CancellationException) {
             throw cancelado
         } catch (erro: Throwable) {
@@ -230,6 +272,14 @@ class P2pTransport(
     }
 
     /**
+     * Este quadro pode ser repetido sem criar uma segunda coisa no mundo?
+     *
+     * @param type tipo do quadro.
+     */
+    private fun repetivel(type: String): Boolean =
+        type != FrameType.PromptSend && type != FrameType.SessionCreate
+
+    /**
      * Fluxo do PC pelo tunel.
      *
      * O stream carrega **linhas de SSE**, exatamente como o caminho direto. Por
@@ -238,31 +288,39 @@ class P2pTransport(
      * transporte nao mude o comportamento do app.
      */
     override fun events(cursor: Long): Flow<IncomingFrame> = flow {
-        val token = tokenProvider()
-        val conn = conectar()
-        val bi = conn.openBi()
-        val pedido = P2pRequest(
-            v = PROTOCOL_VERSION,
-            method = "GET",
-            path = "/ph/stream",
-            query = mapOf("cursor" to cursor.toString()),
-            headers = if (token != null) mapOf("Authorization" to "Bearer " + token) else emptyMap(),
-        )
-        bi.send().writeAll(P2pFraming.encode(json.encodeToString(P2pRequest.serializer(), pedido).encodeToByteArray()))
-        bi.send().finish()
+        try {
+            val token = tokenProvider()
+            val conn = conectar()
+            val bi = conn.openBi()
+            val pedido = P2pRequest(
+                v = PROTOCOL_VERSION,
+                method = "GET",
+                path = "/ph/stream",
+                query = mapOf("cursor" to cursor.toString(), "tail" to REPLAY_TAIL.toString()),
+                headers = if (token != null) mapOf("Authorization" to "Bearer " + token) else emptyMap(),
+            )
+            bi.send().writeAll(P2pFraming.encode(json.encodeToString(P2pRequest.serializer(), pedido).encodeToByteArray()))
+            bi.send().finish()
 
-        val recv = bi.recv()
-        val linhas = flow {
-            while (true) {
-                val quadro = json.decodeFromString(
-                    P2pResponse.serializer(),
-                    P2pFraming.decode(recv).decodeToString(),
-                )
-                if (quadro.done) break
-                quadro.event?.let { emit(it) }
+            val recv = bi.recv()
+            val linhas = flow {
+                while (true) {
+                    val quadro = json.decodeFromString(
+                        P2pResponse.serializer(),
+                        P2pFraming.decode(recv).decodeToString(),
+                    )
+                    if (quadro.done) break
+                    quadro.event?.let { emit(it) }
+                }
             }
+            SseDecoder.decode(linhas).collect { emit(it) }
+        } finally {
+            // O fluxo acabou — queda, prazo de silêncio ou troca de rede — e a
+            // conexão que o servia NÃO serve mais para a próxima. Guardá-la era o
+            // que fazia o app tentar de novo em cima da mesma conexão zumbi e
+            // nunca mais voltar: é o sintoma mais caro deste transporte.
+            conexao = null
         }
-        SseDecoder.decode(linhas).collect { emit(it) }
     }
 
     override suspend fun probe(): TransportHealth {
