@@ -14,3 +14,6 @@ local-maven/
 # Sistema
 .DS_Store
 *.log
+
+# Notas de trabalho — nao vao para o GitHub
+PENDENCIAS.md
