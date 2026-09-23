@@ -55,6 +55,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.pockethound.app.core.model.LinkStatus
 import com.pockethound.app.core.model.Session
 import com.pockethound.app.core.model.TodoItem
 import com.pockethound.app.core.model.TurnItem
@@ -310,8 +311,19 @@ fun ChatScreen(viewModel: RootViewModel) {
                 modifier = Modifier.padding(end = 4.dp),
             )
             PhBadge(
-                text = if (link.isOnline) "ao vivo" else "offline",
-                tone = if (link.isOnline) PhTone.Ok else PhTone.Danger,
+                // Tres estados, sem mentir: dizer "offline" durante uma
+                // reconexao que esta funcionando fez o app parecer morto com a
+                // conexao viva (campo, 23/09).
+                text = when (link.status) {
+                    LinkStatus.Online -> "ao vivo"
+                    LinkStatus.Connecting -> "conectando"
+                    LinkStatus.Offline -> "offline"
+                },
+                tone = when (link.status) {
+                    LinkStatus.Online -> PhTone.Ok
+                    LinkStatus.Connecting -> PhTone.Warn
+                    LinkStatus.Offline -> PhTone.Danger
+                },
                 glyph = true,
                 modifier = Modifier.padding(end = 4.dp),
             )

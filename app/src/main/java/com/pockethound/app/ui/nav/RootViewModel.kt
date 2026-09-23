@@ -124,6 +124,9 @@ class RootViewModel @Inject constructor(
     /** Pede ao PC o reenvio do que ele ainda guarda (o botão de atualizar). */
     fun atualizar() = repository.atualizar()
 
+    /** Reconexão forçada (Torre): endpoint novo + laço religado. */
+    fun reconectar() = repository.reconectar()
+
     fun decide(requestId: String, allowed: Boolean, remember: Boolean = false) =
         repository.decide(requestId, allowed, remember)
 

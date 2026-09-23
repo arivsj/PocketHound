@@ -98,6 +98,9 @@ class IrohEndpointProvider @Inject constructor(
     @Volatile
     private var endpoint: Endpoint? = null
 
+    /** De quanto em quanto as sondas mortas seguidas pedem um endpoint novo. */
+    private val autocura = Autocura()
+
     suspend fun endpoint(): Endpoint = mutex.withLock {
         endpoint?.let { return it }
         val segredo = secureStore.readP2pKey() ?: SecretKey.generate().toBytes().also { secureStore.writeP2pKey(it) }
@@ -107,6 +110,44 @@ class IrohEndpointProvider @Inject constructor(
     }
 
     suspend fun endpointId(): String = endpoint().id().toString()
+
+    /**
+     * Fecha o endpoint atual; o proximo [endpoint] nasce do zero.
+     *
+     * E o mesmo soco do force-stop do app, so que sem fechar o app: fecha o
+     * QUIC, as conexoes e o socket da rede antiga. A CHAVE nao muda (vem do
+     * [SecureStore]), entao a identidade e o pareamento continuam valendo —
+     * nasce o runtime, nao o aparelho.
+     *
+     * Mutex junto do bind: recriar enquanto outro fio segura o endpoint velho
+     * deixaria o proximo chamador com um objeto ja fechado na mao.
+     */
+    suspend fun recriar() = mutex.withLock {
+        endpoint?.let { antigo ->
+            try {
+                antigo.close()
+            } catch (_: Throwable) {
+                // Fechar o que ja morreu nao pode matar a recriacao.
+            }
+        }
+        endpoint = null
+    }
+
+    /**
+     * Registra o resultado de uma sonda P2P e executa a autocuracao.
+     *
+     * [limite] mortas seguidas (ver [Autocura]) derrubam e recriam o endpoint;
+     * qualquer sucesso zera a contagem. Chamado no fim de todo probe — e so.
+     *
+     * @param reachable se a sonda respondeu.
+     */
+    suspend fun notaSonda(reachable: Boolean) {
+        if (reachable) {
+            autocura.sucesso()
+            return
+        }
+        if (autocura.falhou()) recriar()
+    }
 
     companion object {
         /** O mesmo ALPN do outro lado. ALPN diferente = conexao recusada sem explicacao. */
@@ -329,7 +370,7 @@ class P2pTransport(
             return TransportHealth(false, path = "p2p", reason = "sem ticket: pareie de novo")
         }
         val iniciado = System.currentTimeMillis()
-        return try {
+        val saude = try {
             val resposta = withTimeoutOrNull(PROBE_TIMEOUT_MS) {
                 val conn = conectar()
                 val bi = conn.openBi()
@@ -341,12 +382,22 @@ class P2pTransport(
             if (resposta != null && resposta.status in 200..299) {
                 TransportHealth(true, System.currentTimeMillis() - iniciado, "p2p", ticket.take(16))
             } else {
+                // Tempo esgotado = conexao MORTA MAS ABERTA (a rede mudou por
+                // baixo): descartar aqui, senao o proximo probe reaproveita o
+                // zumbi e o app tenta para sempre sem abrir socket nenhum — o
+                // defeito de campo de 23/09. Soltar e o que permite o handshake
+                // novo na proxima volta.
+                conexao = null
                 TransportHealth(false, path = "p2p", endpoint = ticket.take(16), reason = "sem resposta")
             }
         } catch (erro: Throwable) {
             conexao = null
             TransportHealth(false, path = "p2p", endpoint = ticket.take(16), reason = erro::class.simpleName)
         }
+        // Autocuracao: mortas seguidas no limite recriam o endpoint QUIC
+        // (mesma chave — o pareamento continua valendo). Ver [Autocura].
+        provider.notaSonda(saude.reachable)
+        return saude
     }
 
     /**

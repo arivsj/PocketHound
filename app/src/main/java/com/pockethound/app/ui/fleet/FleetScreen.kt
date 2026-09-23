@@ -46,7 +46,10 @@ fun FleetRoute(viewModel: RootViewModel = hiltViewModel()) {
  * Aba Torre: sessões vivas, estado do PC e transporte ativo.
  *
  * TODO(pockethound): desk.state, session.upsert e session.gone ainda não chegam —
- * os números são de exemplo e o botão "testar" só refaz a sonda local.
+ * os números são de exemplo. O botão "reconectar" é o socorro manual: derruba
+ * o endpoint QUIC (identidade e pareamento sobrevivem) e religa o laço do
+ * zero, o mesmo force-stop que no caso de campo de 23/09 voltou a conexao em
+ * 5 segundos — agora sem fechar o app.
  */
 @Composable
 fun FleetScreen(viewModel: RootViewModel) {
@@ -90,14 +93,18 @@ fun FleetScreen(viewModel: RootViewModel) {
                             modifier = Modifier.weight(1f),
                         )
                         PhButton(
-                            text = "testar",
-                            onClick = { },
+                            text = "reconectar",
+                            onClick = { viewModel.reconectar() },
                             variant = PhButtonVariant.Ghost,
                         )
                     }
                     PhKeyValue(label = "transporte", value = pairing.transportMode.name)
                     PhKeyValue(label = "endereço", value = pairing.directBaseUrl.ifBlank { "não definido" })
                     PhKeyValue(label = "latência", value = link.latencyMs?.let { it.toString() + " ms" } ?: "—")
+                    // O diagnostico cru que faltava: POR QUE o link caiu (ou o
+                    // ultimo evento). O estado ja carregava isto desde sempre;
+                    // ninguem mostrava, e ai "conectando" virava um enigma.
+                    PhKeyValue(label = "motivo", value = link.reason ?: "—")
                     PhKeyValue(
                         label = "cursor",
                         value = pairing.lastSeq.toString(),

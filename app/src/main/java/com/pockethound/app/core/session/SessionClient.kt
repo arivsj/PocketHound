@@ -1,5 +1,8 @@
 package com.pockethound.app.core.session
 
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
 import com.pockethound.app.core.model.FrameType
 import com.pockethound.app.core.model.IncomingFrame
 import com.pockethound.app.core.model.PhCodec
@@ -12,6 +15,7 @@ import com.pockethound.app.core.transport.TransportMode
 import com.pockethound.app.core.transport.TransportRequest
 import com.pockethound.app.core.transport.TransportResult
 import com.pockethound.app.core.transport.TransportSelector
+import dagger.hilt.android.qualifiers.ApplicationContext
 import io.ktor.client.HttpClient
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -31,6 +35,8 @@ import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.coroutines.flow.timeout
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonObject
 
 /** Estado da ligação com o PC, para a tela mostrar a verdade. */
@@ -72,6 +78,7 @@ class SessionClient @Inject constructor(
     private val client: HttpClient,
     private val selector: TransportSelector,
     private val lanBeacon: LanBeacon,
+    @ApplicationContext private val context: Context,
 ) {
     private val _state = MutableStateFlow(ConnectionState())
     val state: StateFlow<ConnectionState> = _state.asStateFlow()
@@ -82,6 +89,36 @@ class SessionClient @Inject constructor(
     val frames: SharedFlow<IncomingFrame> = _frames.asSharedFlow()
 
     private var loop: Job? = null
+
+    /** Escopo do laço — é por aqui que uma reconexão pedida de fora entra. */
+    private var escopo: CoroutineScope? = null
+
+    /** Serializa reconexões: troca de rede e botão não podem dobrar o laço. */
+    private val munhecaReconexao = Mutex()
+
+    /** Só o laco da geracao vigente pode escrever o estado (ver GeracaoDeLaco). */
+    private val geracao = GeracaoDeLaco()
+
+    /**
+     * Ouve a mudança de rede de baixo (Wi-Fi ↔ 4G, modo avião).
+     *
+     * O endpoint QUIC nasceu na rede antiga e não se recupera sozinho — é o
+     * que prendeu o app por horas no caso de campo de 23/09. Toda troca real
+     * derruba o endpoint e religa o laço do zero.
+     */
+    private val connectivity = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+
+    private val redeCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) = trocaDeRede()
+        override fun onLost(network: Network) = trocaDeRede()
+    }
+
+    private var redeRegistrada = false
+
+    /** O primeiro aviso é o eco "a rede atual é essa" do registro — não conta. */
+    private var primeiroAvisoDeRede = true
+
+    private var ultimaTrocaDeRedeMs = 0L
 
     /** O fluxo aberto agora. O pedido de atualização derruba só ele. */
     @Volatile
@@ -105,11 +142,85 @@ class SessionClient @Inject constructor(
      */
     fun start(scope: CoroutineScope) {
         if (loop?.isActive == true) return
+        escopo = scope
+        registrarRede()
         // O farol sobe junto: ele não é um caminho, é o que diz QUAL é o
         // endereço do PC agora. Sem ele, o app só sabe o endereço que ficou
         // gravado no pareamento — e esse envelhece sem avisar.
         lanBeacon.start(scope)
-        loop = scope.launch { executar() }
+        loop = scope.launch { executar(geracao.vigente()) }
+    }
+
+    /**
+     * Registra o ouvinte de rede (uma vez por laço ligado).
+     *
+     * O Android manda um aviso de "a rede atual é esta" logo no registro;
+     * ele é engolido — só troca DEPOIS disso conta como troca.
+     */
+    private fun registrarRede() {
+        if (redeRegistrada) return
+        primeiroAvisoDeRede = true
+        connectivity.registerDefaultNetworkCallback(redeCallback)
+        redeRegistrada = true
+    }
+
+    private fun desregistrarRede() {
+        if (!redeRegistrada) return
+        runCatching { connectivity.unregisterNetworkCallback(redeCallback) }
+        redeRegistrada = false
+    }
+
+    /**
+     * A rede de baixo mudou de verdade.
+     *
+     * Debounce porque o Android costuma mandar perdido+ganhado em rajada, e
+     * reiniciar o laço duas vezes seguidas é trabalho jogado fora.
+     */
+    private fun trocaDeRede() {
+        if (primeiroAvisoDeRede) {
+            primeiroAvisoDeRede = false
+            return
+        }
+        val agora = System.currentTimeMillis()
+        if (agora - ultimaTrocaDeRedeMs < TROCA_REDE_DEBOUNCE_MS) return
+        ultimaTrocaDeRedeMs = agora
+        reconectar("troca de rede")
+    }
+
+    /**
+     * Reconexão forcada: endpoint QUIC novo, laço religado do zero.
+     *
+     * É o `force-stop` do app só que dentro dele — o que na rua resolveu em
+     * 5 segundos no caso de campo de 23/09. Derruba o endpoint (a identidade
+     * e o pareamento sobrevivem), mata o laço velho com seu backoff e nasce
+     * outro já tentando. Serializado: troca de rede e toque no botão não
+     * podem dobrar o laço.
+     *
+     * @param motivo o que pediu, para a tela contar.
+     */
+    fun reconectar(motivo: String = "pedido") {
+        // Feedback ANTES do trabalho pesado: a tela muda no mesmo segundo —
+        // um botao que nao muda nada parece morto (foi o que o teste de campo
+        // mostrou). A geracao nova ja tira do laço velho o direito de escrever.
+        val minhaGeracao = geracao.proxima()
+        publicar(
+            minhaGeracao,
+            _state.value.copy(status = ConnectionStatus.Reconectando, reason = motivo),
+        )
+        val escopo = this.escopo ?: return
+        escopo.launch {
+            munhecaReconexao.withLock {
+                // ORDEM IMPORTA: cancelar o laço PRIMEIRO (instantaneo) e
+                // recriar DEPOIS. Recriar antes brigava pelo monitor nativo do
+                // iroh com o laço vivo — o botao ficava minutos travado sem
+                // atualizar a tela (campo, 23/09). E sem join: a geracao ja
+                // impede o velho de escrever estado, nao ha porque esperar ele
+                // morrer pra religar.
+                loop?.cancel()
+                selector.recriar()
+                loop = escopo.launch { executar(minhaGeracao) }
+            }
+        }
     }
 
     /**
@@ -137,6 +248,7 @@ class SessionClient @Inject constructor(
     /** Derruba o laço e marca offline. */
     fun stop() {
         lanBeacon.stop()
+        desregistrarRede()
         loop?.cancel()
         loop = null
         _state.value = _state.value.copy(status = ConnectionStatus.Offline)
@@ -144,12 +256,17 @@ class SessionClient @Inject constructor(
 
     private suspend fun token(): String? = secureStore.readToken()
 
-    private suspend fun executar() {
+    private suspend fun executar(minhaGeracao: Int) {
         var atraso = ATRASO_MINIMO_MS
         while (true) {
+            // Laco de uma geracao ja deposta: sai em silencio antes de qualquer I/O.
+            if (!geracao.vigente(minhaGeracao)) return
             val sessao = settingsStorage.read()
-            _state.value = _state.value.copy(
-                status = if (_state.value.cursor > 0) ConnectionStatus.Reconectando else ConnectionStatus.Conectando,
+            publicar(
+                minhaGeracao,
+                _state.value.copy(
+                    status = if (_state.value.cursor > 0) ConnectionStatus.Reconectando else ConnectionStatus.Conectando,
+                ),
             )
 
             // Cursor carregado do disco na PRIMEIRA rodada. Sem isto, todo
@@ -166,7 +283,7 @@ class SessionClient @Inject constructor(
             // Sem pareamento não há o que conectar; espera e tenta de novo, para
             // o app se recuperar sozinho depois de um pareamento.
             if (!sessao.isPaired) {
-                _state.value = ConnectionState(status = ConnectionStatus.Offline, reason = "PC não pareado")
+                publicar(minhaGeracao, ConnectionState(status = ConnectionStatus.Offline, reason = "PC não pareado"))
                 delay(ATRASO_MAXIMO_MS)
                 continue
             }
@@ -183,14 +300,18 @@ class SessionClient @Inject constructor(
             )
 
             if (!selecionado.health.reachable) {
-                _state.value = _state.value.copy(status = ConnectionStatus.Offline)
+                publicar(minhaGeracao, _state.value.copy(status = ConnectionStatus.Offline))
                 delay(atraso)
                 atraso = (atraso * 2).coerceAtMost(ATRASO_MAXIMO_MS)
                 continue
             }
 
             atraso = ATRASO_MINIMO_MS
-            _state.value = _state.value.copy(status = ConnectionStatus.Online, reason = null)
+            // O motivo NÃO some quando volta: ele vira "a última coisa que
+            // aconteceu" ("troca de rede", "silêncio", o nome da exceção).
+            // Sem isto a Torre não conta por que o link caiu — e adivinhar a
+            // causa em campo custou horas (23/09).
+            publicar(minhaGeracao, _state.value.copy(status = ConnectionStatus.Online))
 
             // O cursor DESTA conexão. Um pedido de atualização manda mais que o
             // último `seq` visto: é ele que traz de volta o que a tela perdeu.
@@ -251,9 +372,9 @@ class SessionClient @Inject constructor(
                 // Rethrowar os dois mataria a conexão para sempre na primeira
                 // rede ruim — o defeito que este app mais teme.
                 if (!currentCoroutineContext().isActive) throw cancelado
-                perdeuOCaminho("silêncio")
+                perdeuOCaminho("silêncio", minhaGeracao)
             } catch (erro: Throwable) {
-                perdeuOCaminho(erro::class.simpleName)
+                perdeuOCaminho(erro::class.simpleName, minhaGeracao)
             }
             delay(ATRASO_MINIMO_MS)
         }
@@ -270,9 +391,23 @@ class SessionClient @Inject constructor(
      *
      * @param motivo o que derrubou o fluxo, para a tela contar.
      */
-    private fun perdeuOCaminho(motivo: String?) {
+    private fun perdeuOCaminho(motivo: String?, minhaGeracao: Int) {
         selector.invalidar()
-        _state.value = _state.value.copy(status = ConnectionStatus.Reconectando, reason = motivo)
+        publicar(minhaGeracao, _state.value.copy(status = ConnectionStatus.Reconectando, reason = motivo))
+    }
+
+    /**
+     * Grava estado SO se este laco ainda for o dono (ver [GeracaoDeLaco]).
+     *
+     * O laco velho cancelado so morre no proximo ponto de suspensao; sem este
+     * portao ele ainda gravaria "offline" por cima do "conectando" do novo —
+     * o badge mentindo com a conexao viva (campo, 23/09).
+     *
+     * @param minhaGeracao a geracao que este laco anotou ao nascer.
+     * @param novo o estado a gravar.
+     */
+    private fun publicar(minhaGeracao: Int, novo: ConnectionState) {
+        if (geracao.vigente(minhaGeracao)) _state.value = novo
     }
 
     /**
@@ -361,5 +496,8 @@ class SessionClient @Inject constructor(
 
         /** Folga entre duas gravações do cursor no disco. */
         const val INTERVALO_CURSOR_MS = 5_000L
+
+        /** Janela que cola o perdido+ganhado do Android numa troca só. */
+        const val TROCA_REDE_DEBOUNCE_MS = 3_000L
     }
 }

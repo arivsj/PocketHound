@@ -243,6 +243,19 @@ class TransportSelector @Inject constructor(
     }
 
     /**
+     * Recria o endpoint QUIC e esquece a escolha — a reconexao forcada.
+     *
+     * Chamado quando a rede muda por baixo e pelo botao "reconectar" da Torre:
+     * o endpoint velho nasceu na rede antiga e nao se recupera sozinho (caso de
+     * campo 23/09). A identidade — e o pareamento — sobrevive; so o runtime
+     * renasce.
+     */
+    suspend fun recriar() {
+        cache = null
+        irohProvider.recriar()
+    }
+
+    /**
      * @param client cliente Ktor já montado.
      * @param tokenProvider token do dispositivo.
      * @param forceRefresh sonda de novo mesmo com a escolha ainda valida.

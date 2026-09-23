@@ -724,6 +724,17 @@ class HoundRepository @Inject constructor(
      * ele faz isso para TODOS os celulares, conectados ou não. Este é o mesmo
      * replay, pedido na hora em que o humano desconfia da tela.
      */
+    /**
+     * Reconexão forcada — o botão "reconectar" da aba Torre.
+     *
+     * Endpoint QUIC novo e laço religado do zero, sem reparear: é o socorro
+     * manual para quando a rede mudou por baixo e o app não percebeu (ou para
+     * quem prefere dedo a esperar a autocuracao).
+     */
+    fun reconectar() {
+        sessionClient.reconectar("pedido do usuário")
+    }
+
     fun atualizar() {
         if (_atualizacao.value.emCurso) return
 
