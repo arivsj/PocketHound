@@ -8,6 +8,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -28,6 +29,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -373,6 +375,58 @@ fun PhButton(
             contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp),
             interactionSource = interaction,
             content = label,
+        )
+    }
+}
+
+/**
+ * Botão redondo, só com ícone — é o enviar do chat, ao lado do campo.
+
+ * Redondo e sem rótulo porque ele vive AO LADO do campo, e não embaixo: um botão
+ * de largura fixa come a linha inteira que o texto precisa. Sem texto, quem lê a
+ * tela depende de [description] — por isso ela não tem valor padrão.
+ *
+ * @param icon ícone do botão.
+ * @param description nome do ícone para acessibilidade.
+ * @param onClick toque.
+ * @param modifier modificador de layout.
+ * @param enabled se responde ao toque.
+ * @param tone cor do ícone e do anel.
+ */
+@Composable
+fun PhIconButton(
+    icon: ImageVector,
+    description: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    tone: Color = PhViolet,
+) {
+    val interaction = remember { MutableInteractionSource() }
+    // Desenhado a mao, e nao com `IconButton` do Material: o botao do Material
+    // impoe o proprio tamanho e o proprio alvo de toque, e o circulo sairia com
+    // um diametro que nao e o pedido. Aqui o tamanho e o do design system.
+    Box(
+        modifier = modifier
+            .size(48.dp)
+            .phPress(interaction, enabled, PRESS_SCALE_BUTTON)
+            .clip(CircleShape)
+            .background(if (enabled) tone.copy(alpha = 0.16f) else PhSurface2)
+            .border(1.dp, if (enabled) tone.copy(alpha = 0.55f) else PhBorder, CircleShape)
+            .clickable(
+                interactionSource = interaction,
+                indication = LocalIndication.current,
+                enabled = enabled,
+                onClickLabel = description,
+                onClick = onClick,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = description,
+            tint = if (enabled) tone else PhTextMute,
+            modifier = Modifier.size(20.dp),
         )
     }
 }

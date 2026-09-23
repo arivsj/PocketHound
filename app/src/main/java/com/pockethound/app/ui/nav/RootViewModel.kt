@@ -106,7 +106,12 @@ class RootViewModel @Inject constructor(
 
     fun selectSession(sessionId: String) = repository.selectSession(sessionId)
 
-    fun sendPrompt(text: String) = repository.sendPrompt(text)
+    /**
+     * Manda o prompt da tela.
+     * @param text o rascunho.
+     * @param furarFila se a mensagem entra no turno em curso, na frente da fila.
+     */
+    fun sendPrompt(text: String, furarFila: Boolean = false) = repository.sendPrompt(text, furarFila)
 
     fun cancelTurn() = repository.cancelTurn()
 

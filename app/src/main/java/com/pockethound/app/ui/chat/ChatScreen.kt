@@ -5,6 +5,9 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.DragInteraction
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,6 +27,9 @@ import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Send
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -40,6 +46,8 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -59,13 +67,15 @@ import com.pockethound.app.ui.common.PhBadge
 import com.pockethound.app.ui.questions.CartaoDePergunta
 import com.pockethound.app.ui.common.PhButton
 import com.pockethound.app.ui.common.PhButtonVariant
+import com.pockethound.app.ui.common.PhIconButton
 import com.pockethound.app.ui.common.PhScreenScaffold
 import com.pockethound.app.ui.common.PhState
 import com.pockethound.app.ui.common.PhStateKind
-import com.pockethound.app.ui.common.PhTextField
 import com.pockethound.app.ui.common.PhTone
 import com.pockethound.app.ui.nav.RootViewModel
 import com.pockethound.app.ui.theme.PhAmber
+import com.pockethound.app.ui.theme.PhBg
+import com.pockethound.app.ui.theme.PhBorder
 import com.pockethound.app.ui.theme.PhDanger
 import com.pockethound.app.ui.theme.PhInfo
 import com.pockethound.app.ui.theme.PhOk
@@ -73,6 +83,7 @@ import com.pockethound.app.ui.theme.PhSurface
 import com.pockethound.app.ui.theme.PhSurface2
 import com.pockethound.app.ui.theme.PhText
 import com.pockethound.app.ui.theme.PhTextDim
+import com.pockethound.app.ui.theme.PhTextMute
 import com.pockethound.app.ui.theme.PhViolet
 import com.pockethound.app.ui.theme.PhVioletSoft
 import kotlin.math.roundToInt
@@ -370,8 +381,8 @@ fun ChatScreen(viewModel: RootViewModel) {
             Composer(
                 value = draft,
                 onValueChange = { draft = it },
-                onSend = {
-                    viewModel.sendPrompt(draft)
+                onSend = { furarFila ->
+                    viewModel.sendPrompt(draft, furarFila)
                     draft = ""
                     // Quem acabou de escrever quer ver a propria mensagem: volta a
                     // acompanhar, mesmo que estivesse lendo mais acima.
@@ -480,6 +491,11 @@ private fun AvisoDePrompt(estado: PromptStatus) {
         estado.ack == PromptAck.Stalled ->
             segundos(estado.waitedMs) + " desde os primeiros quadros, sem nenhuma resposta. A sessão " +
                 "pode estar travada atrás de um turno aberto — toque em parar ou escolha outra sessão."
+
+        // "Furar fila" nao e fila: a mensagem entrou no turno em curso, na frente
+        // do que esperava. Dizer "entrou na fila do proximo turno" aqui seria
+        // mentira — e essa mentira faz o usuario mandar a mesma coisa duas vezes.
+        estado.furarFila -> "você furou a fila: a mensagem entra no meio do turno em curso"
 
         estado.queued -> "a sessão já estava ocupada: o prompt entrou na fila do próximo turno"
 
@@ -874,21 +890,29 @@ private fun FaixaDaFilaEModelo(turno: TurnStatus) {
 /**
  * O composer: campo, botoes e o retrato da sessao.
  *
- * O **enviar fica a direita**, como em todo mensageiro — a mao ja vai la. O
- * `steer` fica sozinho na esquerda, que e onde ele nao atrapalha: e o modo raro.
+ * O **enviar fica AO LADO do campo**, alinhado ao rodape do balao, redondo e so
+ * com a seta: a mao ja vai para a direita, o rotulo nao cabe e o espaco e do
+ * texto. O "furar fila" vive DENTRO do balao, na linha de baixo do que se
+ * escreve: ele decide como ESTA mensagem entra, entao pertence ao campo, nao a
+ * barra de botoes. E so aparece quando ha texto — sem texto nao ha o que furar.
  *
  * @param value rascunho.
  * @param onValueChange escrita do rascunho.
- * @param onSend envio (modo followup: entra na fila do proximo turno).
+ * @param onSend envio, com a marca de furar fila daquele envio.
  * @param turno estado da sessao — de onde sai o gasto e o contexto.
  */
 @Composable
 private fun Composer(
     value: String,
     onValueChange: (String) -> Unit,
-    onSend: () -> Unit,
+    onSend: (furarFila: Boolean) -> Unit,
     turno: TurnStatus,
 ) {
+    // A marca vale para UM envio: depois de mandar, o campo esvazia e a linha
+    // some com ela. Deixar ligada escondida faria a proxima mensagem furar fila
+    // sem ninguem ter pedido.
+    var furarFila by remember { mutableStateOf(false) }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -898,42 +922,154 @@ private fun Composer(
     ) {
         // Fila e modelo, acima do campo: o que voce confere antes de escrever.
         FaixaDaFilaEModelo(turno)
-        PhTextField(
-            value = value,
-            onValueChange = onValueChange,
-            label = "prompt",
-            placeholder = "O que o Harness deve fazer?",
-            singleLine = false,
-            minLines = 1,
-            maxLines = 5,
-        )
+
+        // O enviar fica AO LADO do campo, alinhado ao rodape dele, e nao embaixo:
+        // assim a linha de baixo do balao — a do "furar fila" — nao e empurrada
+        // para longe do texto, e o dedo acha o botao na altura do polegar.
         Row(
             modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
+            verticalAlignment = Alignment.Bottom,
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            // TODO(pockethound): o steer e o modo que INTERROMPE o turno em curso
-            // e injeta a mensagem no meio dele (PromptMode.Steer). O caminho ja
-            // existe no PC (`target.steer`), falta a tela decidir quando oferecer.
-            PhButton(
-                text = "steer",
-                onClick = onSend,
-                variant = PhButtonVariant.Ghost,
-                enabled = false,
+            BalaoDoPrompt(
+                value = value,
+                onValueChange = onValueChange,
+                furarFila = furarFila,
+                onFurarFila = { furarFila = it },
+                modifier = Modifier.weight(1f),
             )
-            // Empurra o enviar para a direita.
-            Box(modifier = Modifier.weight(1f))
-            PhButton(
-                text = "enviar",
-                onClick = onSend,
-                enabled = value.isNotBlank(),
+            // Redondo e so com o icone: o rotulo "enviar" ja foi dito mil vezes
+            // pela seta, e o espaco e do texto.
+            PhIconButton(
                 icon = Icons.Filled.Send,
+                description = "enviar",
+                onClick = {
+                    onSend(furarFila)
+                    furarFila = false
+                },
+                enabled = value.isNotBlank(),
             )
         }
 
         // O retrato embaixo do campo, como voce pediu: quanto a sessao custou e
         // quanto do contexto ja foi. Vem do PC, que le as projecoes do Harness.
         RetratoDaSessao(turno)
+    }
+}
+
+/**
+ * O balao do prompt: a borda, o campo e — com texto — a linha do "furar fila".
+ *
+ * O balao e desenhado AQUI, e nao pelo [PhTextField] de sempre, por um motivo so:
+ * o "furar fila" mora DENTRO dele, na linha de baixo do que se escreve. O campo
+ * interno fica sem borda propria para nao nascer um segundo risco dentro do balao;
+ * a cor da borda — violeta no foco — e a mesma do campo padrao.
+ *
+ * @param value rascunho.
+ * @param onValueChange escrita do rascunho.
+ * @param furarFila se a mensagem vai entrar no turno em curso.
+ * @param onFurarFila alterna a marca.
+ * @param modifier modificador de layout — o envio manda `weight(1f)` para o balão
+ *   dividir a linha com o botão redondo.
+ */
+@Composable
+private fun BalaoDoPrompt(
+    value: String,
+    onValueChange: (String) -> Unit,
+    furarFila: Boolean,
+    onFurarFila: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val interacao = remember { MutableInteractionSource() }
+    val focado by interacao.collectIsFocusedAsState()
+
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(MaterialTheme.shapes.small)
+            .background(PhBg)
+            .border(1.dp, if (focado) PhViolet else PhBorder, MaterialTheme.shapes.small),
+    ) {
+        OutlinedTextField(
+            value = value,
+            onValueChange = onValueChange,
+            modifier = Modifier.fillMaxWidth(),
+            placeholder = {
+                Text(
+                    text = "O que o Harness deve fazer?",
+                    color = PhTextMute,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            },
+            singleLine = false,
+            minLines = 1,
+            maxLines = 5,
+            shape = MaterialTheme.shapes.small,
+            interactionSource = interacao,
+            textStyle = MaterialTheme.typography.bodyMedium.copy(
+                color = PhText,
+                fontWeight = FontWeight.Normal,
+            ),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedTextColor = PhText,
+                unfocusedTextColor = PhText,
+                cursorColor = PhViolet,
+                // A borda e a do balao: aqui dentro, so o texto.
+                focusedBorderColor = Color.Transparent,
+                unfocusedBorderColor = Color.Transparent,
+                disabledBorderColor = Color.Transparent,
+                focusedContainerColor = Color.Transparent,
+                unfocusedContainerColor = Color.Transparent,
+                focusedPlaceholderColor = PhTextMute,
+                unfocusedPlaceholderColor = PhTextMute,
+            ),
+        )
+        // So com texto: a linha existe para decidir COMO esta mensagem entra.
+        if (value.isNotBlank()) {
+            LinhaDeFurarFila(ligado = furarFila, onAlternar = onFurarFila)
+        }
+    }
+}
+
+/**
+ * A marca "furar fila", uma linha abaixo do que se escreve.
+ *
+ * Marcada, a mensagem nao espera a vez: o PC injeta no turno que ja esta rodando
+ * (`next-step`), no proximo passo. O rotulo diz o que muda porque "furar fila"
+ * sozinho nao conta o essencial: ela passa na frente do que esperava, e nada do
+ * que o agente ja comecou e perdido.
+ *
+ * @param ligado se a marca esta posta.
+ * @param onAlternar alterna a marca.
+ */
+@Composable
+private fun LinhaDeFurarFila(ligado: Boolean, onAlternar: (Boolean) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            // `toggleable` com papel de caixa de marcar: quem usa leitor de tela
+            // ouve "marcado"/"desmarcado", que e o que a linha e.
+            .toggleable(value = ligado, role = Role.Checkbox, onValueChange = onAlternar)
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        PhBadge(
+            text = "furar fila",
+            tone = if (ligado) PhTone.Violet else PhTone.Neutral,
+            glyph = true,
+        )
+        Text(
+            text = if (ligado) {
+                "entra no meio do turno, na frente da fila"
+            } else {
+                "espera a vez na fila do proximo turno"
+            },
+            color = if (ligado) PhText else PhTextDim,
+            style = MaterialTheme.typography.labelSmall,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 

@@ -73,13 +73,24 @@ object ApprovalOutcome {
     const val Unavailable = "unavailable"
     val all = listOf(AllowedOnce, Rejected, Cancelled, Unavailable)
 }
-
-/** Modo de injeção do prompt: followup entra na fila, steer interrompe o turno. */
+/**
+ * Modo de injecao do prompt.
+ *
+ * - [Followup] entra na fila e roda quando o turno atual terminar (`next-turn`);
+ * - [Steer] e a **fura fila**: entra no turno que ja esta rodando, no proximo
+ *   passo (`next-step`) — a mensagem passa na frente do que estava esperando.
+ */
 object PromptMode {
     const val Followup = "followup"
     const val Steer = "steer"
-}
 
+    /**
+     * O modo de envio a partir da escolha da tela.
+     * @param furarFila se o "furar fila" esta marcado.
+     * @return o modo que vai no quadro.
+     */
+    fun de(furarFila: Boolean): String = if (furarFila) Steer else Followup
+}
 object NoticeLevel {
     const val Info = "info"
     const val Success = "success"

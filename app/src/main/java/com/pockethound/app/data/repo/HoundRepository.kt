@@ -341,6 +341,31 @@ class HoundRepository @Inject constructor(
 
             is IncomingFrame.TurnEvent -> {
                 val id = quadro.session ?: _activeSessionId.value ?: return
+
+                // O vigia do prompt NUNCA fica de fora — nem na recuperação. É ele
+                // quem apaga o aviso "enviado — esperando o PC" quando o PC prova
+                // que produziu resposta. Deixá-lo fora do intervalo de recuperação
+                // deixava o aviso mentindo na tela depois de a resposta já ter
+                // chegado: quem manda um prompt com o agente trabalhando vê "a
+                // sessão já estava ocupada: o prompt entrou na fila do próximo
+                // turno", e o aviso ficava ali muito depois de o turno terminar.
+                //
+                // O preço disso: um quadro antigo do replay também pode apagar o
+                // aviso antes da hora. É o erro menor dos dois — um aviso a menos
+                // por alguns segundos contra um aviso que fica mentindo na tela.
+                observarPrompt(id, quadro.payload.kind)
+
+                // O estado do turno congela na recuperação — um `turn.start` antigo
+                // dobrado como se fosse agora deixaria a sessão "trabalhando" para
+                // sempre. A exceção é a fila: ela é número absoluto do PC, então o
+                // quadro do buraco não inventa estado, só atualiza o retrato.
+                // Congelada, ela ficava presa em "1 na fila" com o PC dizendo zero.
+                if (!recuperando || TurnStatusReducer.dobraDuranteRecuperacao(quadro.payload.kind)) {
+                    _turnStatus.update { atual ->
+                        atual + (id to TurnStatusReducer.fold(atual[id] ?: TurnStatus(), quadro))
+                    }
+                }
+
                 if (recuperando) {
                     ultimoTurnoEm = agora
                     // O replay grande vai para uma transcrição SEPARADA, e só a
@@ -367,10 +392,6 @@ class HoundRepository @Inject constructor(
                 _transcript.update { atual ->
                     atual + (id to TranscriptReducer.reduce(atual[id].orEmpty(), quadro))
                 }
-                _turnStatus.update { atual ->
-                    atual + (id to TurnStatusReducer.fold(atual[id] ?: TurnStatus(), quadro))
-                }
-                observarPrompt(id, quadro.payload.kind)
             }
 
             is IncomingFrame.ApprovalRequest -> {
@@ -538,8 +559,12 @@ class HoundRepository @Inject constructor(
      * Aceito nao e respondido: por isso o [PromptWatchdog] entra em cena aqui. A
      * sessao que aceita o prompt e morre sem responder deixa a tela muda, e mudo e
      * indistinguivel de "esta pensando".
+     *
+     * @param text o que o usuario escreveu.
+     * @param furarFila se a mensagem deve entrar NO TURNO EM CURSO (prioridade),
+     *   em vez de esperar a vez na fila do proximo turno.
      */
-    fun sendPrompt(text: String) {
+    fun sendPrompt(text: String, furarFila: Boolean = false) {
         val limpo = text.trim()
         if (limpo.isEmpty()) return
         val sessao = activeSession() ?: return
@@ -556,16 +581,28 @@ class HoundRepository @Inject constructor(
         // "live" querendo dizer "esta sessao existe na memoria", e traduzir isso
         // como "ocupada" fazia o aviso de fila aparecer com o agente parado —
         // mentira que custou uma tarde de diagnostico.
-        val ocupada = _turnStatus.value[sessao.id]?.running == true
+        //
+        // E "furar fila" nao entra na fila: o PC injeta a mensagem no turno que
+        // ja esta rodando (`next-step`), entao nao ha fila esperando a vez. Por
+        // isso ele nao conta como "ocupada" — o aviso da tela diz o que houve de
+        // verdade, e o prazo e o longo so porque a resposta comeca no proximo
+        // passo, que pode estar no meio de uma ferramenta demorada.
+        val ocupada = !furarFila && _turnStatus.value[sessao.id]?.running == true
         scope.launch {
             val envio = sessionClient.send(
                 FrameType.PromptSend,
-                PhCodec.payloadOf(PromptSendPayload(sessao.id, limpo, PromptMode.Followup)),
+                PhCodec.payloadOf(PromptSendPayload(sessao.id, limpo, PromptMode.de(furarFila))),
                 sessao.id,
             )
             when (envio) {
                 is TransportResult.Ok -> {
-                    _promptStatus.value = watchdog.sent(sessao.id, limpo, ocupada, System.currentTimeMillis())
+                    _promptStatus.value = watchdog.sent(
+                        sessao.id,
+                        limpo,
+                        ocupada,
+                        System.currentTimeMillis(),
+                        furarFila = furarFila,
+                    )
                     agendarVigia()
                 }
 

@@ -32,6 +32,15 @@ data class PromptStatus(
     val waitedMs: Long = 0L,
     /** A sessao ja estava ocupada quando o prompt saiu: a espera e esperada. */
     val queued: Boolean = false,
+    /**
+     * O prompt foi marcado como "furar fila".
+     *
+     * Nao e o mesmo que [queued]: ele nao espera o turno atual terminar, e sim
+     * entra no meio dele, no proximo passo. O aviso da tela diz isso — antes
+     * dizia "entrou na fila do proximo turno" para uma mensagem que nao entrou
+     * em fila nenhuma.
+     */
+    val furarFila: Boolean = false,
 )
 
 /**
@@ -74,6 +83,9 @@ class PromptWatchdog(
     /** A sessao estava ocupada quando o prompt saiu. */
     private var busy: Boolean = false
 
+    /** O usuario marcou "furar fila" neste envio. */
+    private var furouFila: Boolean = false
+
     /**
      * Registra o prompt que acabou de ser aceito pelo PC.
      *
@@ -81,14 +93,16 @@ class PromptWatchdog(
      * @param text o que foi enviado.
      * @param queued se a sessao ja estava trabalhando.
      * @param now instante do envio.
+     * @param furarFila se foi enviado como prioridade (entra no turno em curso).
      * @return o estado inicial do acompanhamento.
      */
-    fun sent(sessionId: String, text: String, queued: Boolean, now: Long): PromptStatus {
+    fun sent(sessionId: String, text: String, queued: Boolean, now: Long, furarFila: Boolean = false): PromptStatus {
         this.sessionId = sessionId
         this.text = text
         this.sentAt = now
         this.sawFrame = false
         this.busy = queued
+        this.furouFila = furarFila
         return status(now)
     }
 
@@ -120,6 +134,7 @@ class PromptWatchdog(
         sentAt = 0L
         sawFrame = false
         busy = false
+        furouFila = false
         return PromptStatus()
     }
 
@@ -127,13 +142,22 @@ class PromptWatchdog(
     fun status(now: Long): PromptStatus {
         val alvo = sessionId ?: return PromptStatus()
         val waited = (now - sentAt).coerceAtLeast(0L)
-        val janela = if (busy) queueWindowMs else answerWindowMs
+        // Furar fila tambem tem prazo longo, por outro motivo: a resposta comeca
+        // no proximo passo, e um passo com ferramenta demorada leva minutos.
+        val janela = if (busy || furouFila) queueWindowMs else answerWindowMs
         val ack = when {
             waited < janela -> PromptAck.Waiting
             sawFrame -> PromptAck.Stalled
             else -> PromptAck.Silent
         }
-        return PromptStatus(ack = ack, sessionId = alvo, text = text, waitedMs = waited, queued = busy)
+        return PromptStatus(
+            ack = ack,
+            sessionId = alvo,
+            text = text,
+            waitedMs = waited,
+            queued = busy,
+            furarFila = furouFila,
+        )
     }
 
     companion object {

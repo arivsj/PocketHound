@@ -100,6 +100,22 @@ class PromptWatchdogTest {
     }
 
     @Test
+    fun respostaApagaOAvisoDeFilaDoPromptEnfileirado() {
+        // O caso relatado: prompt mandado com o agente trabalhando — o aviso "a
+        // sessao ja estava ocupada: o prompt entrou na fila do proximo turno".
+        // A resposta chegou e o aviso ficou na tela, porque o caminho que o apaga
+        // (observarPrompt) ficava de fora enquanto a recuperacao estava aberta.
+        // Do lado do vigia a regra e esta: com fila ou sem fila, producao apaga.
+        val vigia = PromptWatchdog()
+        val aviso = vigia.sent("s1", "faz isso", queued = true, now = t0)
+        assertEquals(true, aviso.queued)
+
+        val depois = vigia.frame("s1", TurnKind.TextDelta, now = t0 + 30_000)
+
+        assertEquals(PromptAck.None, depois.ack)
+    }
+
+    @Test
     fun clearEsqueceOPromptAnterior() {
         val vigia = PromptWatchdog(answerWindowMs = 1_000)
         vigia.sent("s1", "faz isso", queued = false, now = t0)

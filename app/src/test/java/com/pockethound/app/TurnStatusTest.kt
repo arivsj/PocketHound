@@ -92,6 +92,37 @@ class TurnStatusTest {
     }
 
     @Test
+    fun aFilaSeCorrigeMesmoDuranteARecuperacao() {
+        // O app ficou preso em "1 na fila" com o PC dizendo zero: o quadro que
+        // zerava a fila chegou dentro de uma recuperacao, quando o estado do turno
+        // ficava congelado, e foi descartado. A fila e numero ABSOLUTO do PC — nao
+        // pode ficar de fora, senao nao existe quadro futuro capaz de corrigi-la.
+        assertTrue(TurnStatusReducer.dobraDuranteRecuperacao(TurnKind.Inbox))
+
+        val comFila = passo(TurnStatus(), TurnEventPayload(kind = TurnKind.Inbox, queued = 1), ts = 10)
+        val corrigido = passo(comFila, TurnEventPayload(kind = TurnKind.Inbox, queued = 0), ts = 20)
+
+        assertEquals(1, comFila.queued)
+        assertEquals("a fila vazia do PC tem de entrar", 0, corrigido.queued)
+    }
+
+    @Test
+    fun oRestoDoTurnoContinuaCongeladoNaRecuperacao() {
+        // O congelamento existe por um motivo: um `turn.start` antigo, dobrado como
+        // se fosse agora, deixaria a sessao "trabalhando" para sempre.
+        listOf(
+            TurnKind.TurnStart,
+            TurnKind.StepStart,
+            TurnKind.TextDelta,
+            TurnKind.ReasoningDelta,
+            TurnKind.TurnEnd,
+            TurnKind.Stats,
+        ).forEach { kind ->
+            assertFalse("nao deveria dobrar na recuperacao: " + kind, TurnStatusReducer.dobraDuranteRecuperacao(kind))
+        }
+    }
+
+    @Test
     fun sessaoQueOPcNaoConsideraVivaNaoFicaTrabalhando() {
         val aberto = passo(TurnStatus(), TurnEventPayload(kind = TurnKind.TurnStart, turn = 1), ts = 0)
 

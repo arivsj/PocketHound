@@ -134,6 +134,30 @@ object TurnStatusReducer {
     }
 
     /**
+     * Durante a recuperacao, este quadro ainda dobra o estado do turno?
+     *
+     * ## Por que o resto congela
+     *
+     * Recuperacao e o intervalo em que o app esta dobrando um buraco grande do
+     * replay. Um `turn.start` de horas atras, dobrado como se fosse agora,
+     * deixaria a sessao "trabalhando" para sempre — por isso o estado do turno
+     * fica congelado ali (ver `HoundRepository.aplicar`).
+     *
+     * ## Por que a fila NAO pode congelar junto
+     *
+     * A fila e um numero ABSOLUTO que o PC manda a cada mudanca ("2 na fila"),
+     * nao um acumulado de eventos: perder a ultima mudanca deixa a tela presa num
+     * numero que nao se corrige sozinho. Foi assim que o app ficou mostrando
+     * "1 na fila" com o PC dizendo zero. Um quadro de fila vindo do buraco nao
+     * inventa estado — ele traz o retrato do PC naquele instante, e o retrato
+     * seguinte (inclusive o que o PC manda ao reconectar) corrige o resto.
+     *
+     * @param kind tipo do evento de turno.
+     * @return se o quadro ainda vale durante a recuperacao.
+     */
+    fun dobraDuranteRecuperacao(kind: String?): Boolean = kind == TurnKind.Inbox
+
+    /**
      * Marca a sessao como parada quando o PC diz que ela nao esta mais viva.
      *
      * @param atual estado da sessao.
