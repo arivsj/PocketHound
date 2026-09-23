@@ -49,15 +49,18 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.pockethound.app.core.model.Session
+import com.pockethound.app.core.model.TodoItem
 import com.pockethound.app.core.model.TurnItem
 import com.pockethound.app.core.model.TurnItemKind
 import com.pockethound.app.core.session.EstadoDaAtualizacao
 import com.pockethound.app.core.session.PromptAck
+import com.pockethound.app.core.session.ProgressoDoPlano
 import com.pockethound.app.core.session.PromptDaResposta
 import com.pockethound.app.core.session.PromptStatus
 import com.pockethound.app.core.session.SessionOrder
@@ -374,6 +377,11 @@ fun ChatScreen(viewModel: RootViewModel) {
 
             if (atualizacao.pedida) FaixaDaAtualizacao(atualizacao)
 
+            // O plano do turno fica ACIMA da faixa de estado: e' o to-do que o
+            // Harness mostra no navegador (a lista do `todo_write`), com o botao
+            // fixo em cima e a lista so quando se pede para abrir.
+            PainelDoPlano(todos = turno.todos)
+
             FaixaDeEstado(turno = turno, agora = agora, temHistorico = items.isNotEmpty())
 
             if (aviso != null) AvisoDePrompt(aviso)
@@ -569,6 +577,116 @@ private fun FaixaDaAtualizacao(estado: EstadoDaAtualizacao) {
             .padding(bottom = 6.dp),
     )
 }
+
+/**
+ * O plano do turno — o mesmo to-do que o Harness desenha no navegador.
+ *
+ * Nasceu de um pedido explicito: o botao fica FIXO acima da faixa de estado
+ * ("trabalhando ha x tempo · passo x") e a lista so aparece quando se toca nele.
+ * Fechado, o botao cabe numa linha e ainda responde a pergunta que importa —
+ * quantas tarefas ja foram e qual esta andando.
+ *
+ * Some quando o plano esta vazio, e isso e' o normal entre turnos: o Harness zera
+ * a projecao a cada inicio de turno, entao o painel acompanha o plano DO TURNO,
+ * nao um acumulado da sessao.
+ *
+ * @param todos o plano, como veio do PC.
+ */
+@Composable
+private fun PainelDoPlano(todos: List<TodoItem>) {
+    if (todos.isEmpty()) return
+    var aberto by remember { mutableStateOf(false) }
+    val progresso = remember(todos) { ProgressoDoPlano.de(todos) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .padding(bottom = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(8.dp))
+                .clickable { aberto = !aberto }
+                .padding(vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            PhBadge(
+                text = "to-do",
+                tone = if (progresso.concluido) PhTone.Ok else PhTone.Violet,
+                glyph = true,
+            )
+            Text(
+                text = progresso.contagem,
+                color = if (progresso.concluido) PhOk else PhText,
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+            )
+            Text(
+                text = progresso.atual.orEmpty(),
+                color = PhTextDim,
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
+            )
+            Text(
+                text = if (aberto) "\u25BE" else "\u25B8",
+                color = PhTextDim,
+                style = MaterialTheme.typography.labelSmall,
+            )
+        }
+
+        if (aberto) {
+            todos.forEach { item -> LinhaDaTarefa(item) }
+        }
+    }
+}
+
+/**
+ * Uma tarefa do plano: o glifo diz o estado, e o texto encurta quando termina.
+ *
+ * @param item a tarefa, como o agente escreveu.
+ */
+@Composable
+private fun LinhaDaTarefa(item: TodoItem) {
+    val feita = item.status == TAREFA_CONCLUIDA
+    val andando = item.status == TAREFA_EM_ANDAMENTO
+    val cor = when {
+        feita -> PhOk
+        andando -> PhViolet
+        else -> PhTextDim
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 4.dp),
+        verticalAlignment = Alignment.Top,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(
+            text = when {
+                feita -> "\u2713"
+                andando -> "\u25B8"
+                else -> "\u25CB"
+            },
+            color = cor,
+            style = MaterialTheme.typography.labelSmall,
+        )
+        Text(
+            text = item.content,
+            color = if (feita) PhTextDim else PhText,
+            style = MaterialTheme.typography.labelSmall,
+            textDecoration = if (feita) TextDecoration.LineThrough else null,
+        )
+    }
+}
+
+/** Os dois status que ganham glifo proprio; o resto e' pendente. */
+private const val TAREFA_CONCLUIDA = "completed"
+private const val TAREFA_EM_ANDAMENTO = "in_progress"
 
 /**
  * Faixa de estado do turno, logo acima do composer.

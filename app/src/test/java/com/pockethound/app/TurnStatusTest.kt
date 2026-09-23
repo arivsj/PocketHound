@@ -3,6 +3,7 @@ package com.pockethound.app
 import com.pockethound.app.core.model.FrameType
 import com.pockethound.app.core.model.IncomingFrame
 import com.pockethound.app.core.model.PhCodec
+import com.pockethound.app.core.model.TodoItem
 import com.pockethound.app.core.model.TokenUsage
 import com.pockethound.app.core.model.TurnEventPayload
 import com.pockethound.app.core.model.TurnKind
@@ -168,6 +169,38 @@ class TurnStatusTest {
 
         assertEquals("o gasto ficou", 0.5, depois.custoUsd, 0.0000001)
         assertEquals("e o contexto chegou", 25.0, depois.contextoPct!!, 0.1)
+    }
+
+    @Test
+    fun planoNovoEntraNoEstado() {
+        val comPlano = passo(
+            TurnStatus(),
+            TurnEventPayload(
+                kind = TurnKind.Stats,
+                todos = listOf(TodoItem("primeira", "in_progress")),
+            ),
+            ts = 10,
+        )
+
+        assertEquals(1, comPlano.todos.size)
+        assertEquals("primeira", comPlano.todos.first().content)
+    }
+
+    @Test
+    fun retratoSemPlanoApagaOPainel() {
+        // O Harness zera a projecao `todos` a cada inicio de turno e manda a lista
+        // vazia no retrato seguinte. O painel do celular tem de sumir junto com o
+        // do navegador: guardar o plano velho deixava o celular mentindo sobre o
+        // que a tela do PC ja' tinha apagado.
+        val comPlano = passo(
+            TurnStatus(),
+            TurnEventPayload(kind = TurnKind.Stats, todos = listOf(TodoItem("a", "pending"))),
+            ts = 10,
+        )
+        val semPlano = passo(comPlano, TurnEventPayload(kind = TurnKind.Stats), ts = 20)
+
+        assertEquals(1, comPlano.todos.size)
+        assertTrue("o painel sai da tela", semPlano.todos.isEmpty())
     }
 
     @Test

@@ -1,6 +1,7 @@
 package com.pockethound.app.core.session
 
 import com.pockethound.app.core.model.IncomingFrame
+import com.pockethound.app.core.model.TodoItem
 import com.pockethound.app.core.model.TurnKind
 
 /**
@@ -25,6 +26,9 @@ import com.pockethound.app.core.model.TurnKind
  * @param contextoUsado tokens que a proxima requisicao vai levar.
  * @param contextoJanela janela de contexto do modelo.
  * @param modelo id do modelo que esta valendo nesta sessao, como o PC informou.
+ * @param todos o plano do turno, como o PC informou — a MESMA lista que o
+ *   navegador desenha. Vazia quer dizer "sem plano agora": o Harness zera a
+ *   projecao `todos` a cada inicio de turno, e o painel do celular acompanha.
  */
 data class TurnStatus(
     val running: Boolean = false,
@@ -43,6 +47,7 @@ data class TurnStatus(
     val contextoUsado: Long = 0L,
     val contextoJanela: Long = 0L,
     val modelo: String? = null,
+    val todos: List<TodoItem> = emptyList(),
 ) {
     /** Ha quanto tempo o turno esta aberto, do ponto de vista de [agora]. */
     fun decorrido(agora: Long): Long =
@@ -119,6 +124,15 @@ object TurnStatusReducer {
             // preco (perfil sem o plugin de custo), e um nulo nao pode apagar o
             // que ja estava na tela.
             TurnKind.Stats -> atual.copy(
+                // O plano entra como veio, inclusive VAZIO — o painel do celular
+                // espelha o do navegador, e nao guarda plano velho.
+                //
+                // O Harness zera a projecao `todos` a cada inicio de turno, e o
+                // retrato seguinte chega com a lista vazia: e' assim que o painel
+                // some dos dois lados ao mesmo tempo. Guardar o ultimo plano (a
+                // primeira versao fazia isso) deixava o celular mostrando um plano
+                // que a tela do PC ja' tinha apagado.
+                todos = payload.todos,
                 custoUsd = payload.usd ?: atual.custoUsd,
                 custoUsdPico = payload.usdPico ?: atual.custoUsdPico,
                 entrada = payload.entrada ?: atual.entrada,
