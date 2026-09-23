@@ -454,6 +454,27 @@ class HoundRepository @Inject constructor(
                 }
             }
 
+            // TODO(pockethound): aprovações ainda NÃO têm tumba (as perguntas
+            // têm — FilaDePerguntas). Observação: se um dia um cartão de aprovação
+            // JÁ DECIDIDO voltar do nada (chat e/ou bandeja), é esta classe de
+            // defeito. Dois caminhos furam cursor e marca: (1) o desk guarda o
+            // pedido no pendingApprovals dele e o REENVIA com `seq: 0` a cada
+            // reconexão do celular (PocketHound desk, src/transport/server.js:482 —
+            // igual ao zumbi das perguntas, que só a tumba segurou); (2) um
+            // approval.resolved que caiu fora do anel (replayLimit 4000) deixa o
+            // replay do request órfão. O fix do hub — withdrawApproval publica
+            // mesmo sem entry, dsh-plugins ab3cda3 — fecha os casos NOVOS; o
+            // caminho das pedras abaixo fecha os antigos:
+            //   1) em ApprovalResolved: gravar o requestId em aprovacoesResolvidas
+            //      persistida (copiar perguntasResolvidas do SettingsStorage:
+            //      mesma forma, teto 100, mais recente primeiro);
+            //   2) AQUI em ApprovalRequest: se requestId estiver na tumba, sair
+            //      sem reenfileirar e sem notificar — identidade = nada mudou,
+            //      mesmo contrato de FilaDePerguntas.receber;
+            //   3) espelhar os testes (FilaDePerguntasTest → FilaDeAprovacoesTest):
+            //      resolvida não ressuscita / tira mesmo sem item / teto da memória;
+            //   4) prova de campo: decidir aprovação no PC → reiniciar Harness e
+            //      desk → reconectar o celular → o cartão NÃO pode voltar.
             is IncomingFrame.ApprovalRequest -> {
                 val pedido = quadro.payload
                 val novo = ApprovalRequest(
