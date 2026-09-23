@@ -15,10 +15,13 @@ android {
         applicationId = "com.pockethound.app"
         minSdk = 26
         targetSdk = 36
+        // 0.9.2-alpha: reconexao definitiva — autocura do iroh, botao
+        // RECONECTAR, badge honesto (ao vivo/conectando/offline), motivo na
+        // Torre e copiar card por long-press.
         // 0.9.1-alpha: primeira versao em que os dois caminhos do celular
         // funcionam de verdade — aprovar e mandar prompt.
-        versionCode = 2
-        versionName = "0.9.1-alpha"
+        versionCode = 3
+        versionName = "0.9.2-alpha"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
