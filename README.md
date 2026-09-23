@@ -81,6 +81,22 @@ O `local.properties` precisa apontar o SDK (`sdk.dir=...`) e não é versionado.
 Versões: AGP 8.11.2 · Kotlin 2.2.21 · Gradle 8.13 · Compose BOM 2024.12.01 ·
 Hilt 2.57.1 · Ktor 3.0.3 · compileSdk/targetSdk 36 · minSdk 26.
 
+### Plugins (dependência do PC)
+
+O app fala com o Harness por dois plugins que moram em
+**[arivsj/dsh-plugins](https://github.com/arivsj/dsh-plugins)** — fora deste
+repositório; a instalação deles é separada do APK:
+
+```bash
+cd ~/dsh-plugins/pockethound && ./install.sh   # obrigatório: a ponte /ph/*
+cd ~/dsh-plugins/session-cost && ./install.sh  # opcional: dólar e contexto no rodapé
+```
+
+Cada `install.sh` é idempotente: copia o pacote para
+`$DSH_HOME/profiles/node_modules/` e garante a entry em
+`$DSH_HOME/cordis.patch.yml` (camada do usuário = todos os perfis e todos os
+workspaces). A entry compõe a quente, mas o **código** do plugin só carrega no
+boot: **reinicie o Harness** depois de atualizar um plugin.
 ---
 
 ## O que já está pronto
