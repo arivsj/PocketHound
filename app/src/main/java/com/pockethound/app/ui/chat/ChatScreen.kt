@@ -334,7 +334,16 @@ fun ChatScreen(viewModel: RootViewModel) {
                     LinkStatus.Offline -> PhTone.Danger
                 },
                 glyph = true,
-                modifier = Modifier.padding(end = 4.dp),
+                // O selo tambem e o botao: tocar nele da a acordada no link
+                // (mesmo caminho do RECONECTAR da Torre) sem caçar outra tela.
+                // "ao vivo" so volta depois do /ph/ping com o PC responder —
+                // ida e volta confirmada, nao e uma promessa em vazio.
+                modifier = Modifier
+                    .padding(end = 4.dp)
+                    .clickable(
+                        role = Role.Button,
+                        onClickLabel = "reconectar com o PC",
+                    ) { viewModel.reconectar() },
             )
             // "parar" no tamanho do badge (small): era um perigo grande demais
             // para uma barra de status — e encostado no "ao vivo", os dois
