@@ -15,5 +15,10 @@ local-maven/
 .DS_Store
 *.log
 
-# Notas de trabalho — nao vao para o GitHub
+# Notas de trabalho desta maquina: nao vao para o GitHub (a nao ser que eu peca).
+# Sao as folhas que a gente escreve enquanto trabalha — estado, pendencias,
+# diagnostico do momento. Documentacao do projeto (README, docs de arquitetura)
+# sobe normalmente: ela serve a quem pegar o repositorio, nao so a mim.
 PENDENCIAS.md
+ESTADO.md
+CONEXAO.md
