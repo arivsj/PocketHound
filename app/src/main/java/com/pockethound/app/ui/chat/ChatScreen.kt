@@ -1,8 +1,15 @@
 package com.pockethound.app.ui.chat
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.widget.Toast
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -48,6 +55,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
@@ -869,6 +878,7 @@ private fun LinhaDaTranscricao(
 /** Balão de conversa (componente só do celular, DESIGN.md §6.3). */
 @Composable
 private fun Balao(item: TurnItem, isUser: Boolean) {
+    val context = LocalContext.current
     val accent = when (item.kind) {
         TurnItemKind.UserMessage -> PhViolet
         TurnItemKind.Notice -> PhTextDim
@@ -890,6 +900,11 @@ private fun Balao(item: TurnItem, isUser: Boolean) {
                 .clip(RoundedCornerShape(12.dp))
                 .background(if (isUser) PhViolet.copy(alpha = 0.10f) else PhSurface2)
                 .border(1.dp, accent.copy(alpha = 0.35f), RoundedCornerShape(12.dp))
+                // Segurar o balao copia o texto inteiro do card: e o jeito do celular
+                // de pegar uma mensagem sem selecao manual caractere a caractere.
+                .pointerInput(item.id) {
+                    detectTapGestures(onLongPress = { copiarCard(context, item.text) })
+                }
                 .padding(12.dp),
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
@@ -916,8 +931,10 @@ private fun Balao(item: TurnItem, isUser: Boolean) {
  * @param aberto se o corpo esta aberto.
  * @param onToggle alterna o corpo.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun LinhaDePasso(item: TurnItem, aberto: Boolean, onToggle: () -> Unit) {
+    val context = LocalContext.current
     val raciocinio = item.kind == TurnItemKind.Reasoning
     val resultado = item.kind == TurnItemKind.ToolResult || item.kind == TurnItemKind.Error
     val cor = when {
@@ -949,7 +966,12 @@ private fun LinhaDePasso(item: TurnItem, aberto: Boolean, onToggle: () -> Unit) 
             .clip(RoundedCornerShape(10.dp))
             .background(PhSurface2.copy(alpha = 0.5f))
             .border(1.dp, cor.copy(alpha = 0.3f), RoundedCornerShape(10.dp))
-            .clickable(enabled = temCorpo, onClick = onToggle)
+            .combinedClickable(
+                onClick = { if (temCorpo) onToggle() },
+                // Segurar o card copia o texto dele — mesmo sem corpo aberto,
+                // a linha fechada ainda tem o que copiar (assunto/desfecho).
+                onLongClick = { copiarCard(context, corpo ?: item.text.ifBlank { assunto }) },
+            )
             .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
@@ -999,6 +1021,19 @@ private fun LinhaDePasso(item: TurnItem, aberto: Boolean, onToggle: () -> Unit) 
             )
         }
     }
+}
+
+/**
+ * Copia o texto de um card para a area de transferencia e confirma com um tost.
+ *
+ * @param context contexto da tela — clipboard e tost sao servicos do Android.
+ * @param texto o que vai para a area de transferencia.
+ */
+private fun copiarCard(context: Context, texto: String) {
+    if (texto.isBlank()) return
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    clipboard.setPrimaryClip(ClipData.newPlainText("mensagem", texto))
+    Toast.makeText(context, "mensagem copiada", Toast.LENGTH_SHORT).show()
 }
 
 /** Primeira linha com conteudo — o que cabe na linha fechada. */
