@@ -96,9 +96,11 @@ data class ApprovalRequest(
 /**
  * Uma pergunta do agente na tela, com o que já se sabe sobre ela.
  *
- * A pergunta NÃO sai da tela quando é respondida: ela fica salva, com a resposta
- * à mostra e os botões travados. Sumir esconderia o que foi combinado — e deixar
- * respondível fazia a mesma pergunta ser respondida várias vezes.
+ * A pergunta SAI da fila quando o `question.resolved` chega, de qualquer tela
+ * (celular, PC ou regra) — mesma regra do cartão de aprovação. O que
+ * [resposta] cobre é só a ida e volta do celular: o toque trava o cartão na
+ * hora, para a mesma pergunta não ser respondida duas vezes enquanto a resposta
+ * vai e volta; quem tira o cartão é o resolved.
  */
 data class PerguntaNaTela(
     val pedido: com.pockethound.app.core.model.QuestionRequestPayload,
@@ -235,7 +237,7 @@ data class Notice(
     val body: String = "",
 )
 
-/** Estado do link com o PC, mostrado na aba Frota e na chuva de fundo. */
+/** Estado do link com o PC, mostrado na aba Torre e na chuva de fundo. */
 data class LinkState(
     val status: LinkStatus,
     val path: String,
@@ -261,6 +263,8 @@ enum class PhTab(val route: String, val label: String) {
      * ficou para escolher ONDE trabalhar — workspace e sessão.
      */
     Sessions("sessions", "Sessões"),
-    Fleet("fleet", "Frota"),
+    // O rótulo é "Torre" (a torre de rack do ícone, onde a máquina vive);
+    // a rota continua "fleet" de propósito — rota é contrato de deep link.
+    Fleet("fleet", "Torre"),
     Settings("settings", "Ajustes"),
 }

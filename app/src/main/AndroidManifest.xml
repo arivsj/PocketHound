@@ -5,6 +5,15 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.CAMERA" />
 
+    <!-- Avisos na bandeja. No Android 13+ esta permissão também é pedida em
+         runtime, na MainActivity. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Serviço de primeiro plano: é o que mantém o processo vivo ouvindo o PC
+         em segundo plano — a base de "avisa com o app em segundo plano". -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
     <uses-feature
         android:name="android.hardware.camera"
         android:required="false" />
@@ -35,6 +44,17 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Tipo specialUse (API 34+): conexão em tempo real com o PC do usuário.
+             O property abaixo é a justificativa que o sistema exige para o tipo. -->
+        <service
+            android:name=".notificacao.NotificacaoService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Mantém a conexão em tempo real com o PC do usuário para repassar pedidos de autorização e o fim do trabalho em andamento enquanto o app não está em uso." />
+        </service>
     </application>
 
 </manifest>

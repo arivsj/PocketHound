@@ -12,6 +12,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavDestination.Companion.hierarchy
@@ -21,6 +22,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.pockethound.app.PocketHoundApp
 import com.pockethound.app.ui.chat.ChatRoute
 import com.pockethound.app.ui.fleet.FleetRoute
 import com.pockethound.app.ui.pairing.PairingRoute
@@ -65,6 +67,19 @@ fun PhNavRoot(viewModel: RootViewModel = hiltViewModel()) {
             popUpTo(navController.graph.findStartDestination().id) { inclusive = true }
             launchSingleTop = true
         }
+    }
+
+    // O toque numa notificação pede uma rota. O pedido mora no Application (o
+    // processo pode ter NASCIDO por causa do toque) e é consumido UMA vez aqui —
+    // sem isso, abrir "Autorização necessária" cairia na última aba visitada.
+    val app = LocalContext.current.applicationContext as PocketHoundApp
+    val rotaPedida by app.rotaPedida.collectAsStateWithLifecycle()
+
+    LaunchedEffect(rotaPedida, isPaired) {
+        val alvo = rotaPedida ?: return@LaunchedEffect
+        if (!isPaired) return@LaunchedEffect
+        navController.navigate(alvo) { launchSingleTop = true }
+        app.rotaConsumida()
     }
 
     Scaffold(

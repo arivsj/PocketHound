@@ -120,6 +120,19 @@ Hilt 2.57.1 · Ktor 3.0.3 · compileSdk/targetSdk 36 · minSdk 26.
   transparente — dentro do túnel vão as mesmas requisições, com o mesmo Bearer.
   O `IrohEndpointProvider` mantém um único endpoint (bind protegido por mutex) e
   guarda a chave no Tink + Keystore.
+- **Notificações de bandeja** (`notificacao/`): o `NotificacaoService` é um
+  serviço em primeiro plano que **mantém o processo vivo em segundo plano — e
+  com o app fechado pela lista de tarefas** (é ele que segura a conexão com o
+  PC) e converte os `Aviso`s do `HoundRepository` em notificação do Android:
+  `approval.request` / `question.request` ("Autorização necessária", canal de
+  alta que aparece até na tela bloqueada — a aprovação tem janela de ~90 s) e
+  `turn.end` concluído ("Trabalho concluído", id por sessão: atualiza em vez
+  de duplicar). Com a tela aberta não notifica (o cartão já está lá); ao sair
+  da tela, o que estava pendente vira notificação. O toque abre o chat, a
+  resolução no PC retira o aviso da bandeja, e a permissão `POST_NOTIFICATIONS`
+  (Android 13+) é pedida na abertura. **Limite honesto:** *forçar parada*
+  derruba o serviço — aí só um push externo (FCM/ntfy) avisaria, que é o
+  próximo degrau quando quiser. Testes: `NotificacaoTest` (textos e ids).
 - **Decodificador de SSE** (`core/transport/Sse.kt`): separado da rede de
   propósito — é a parte que erra fácil e a única que dá para testar sem servidor.
   Trata batimento (`:`), concatenação de `data:` e, principalmente, **não perde o
@@ -175,7 +188,7 @@ Hilt 2.57.1 · Ktor 3.0.3 · compileSdk/targetSdk 36 · minSdk 26.
   que faltava para "estou em casa, na mesma rede" voltar a conectar depois de o
   DHCP trocar o IP do PC — e por que a decisão de confiar é uma função pura
   testada (`Farol.confiavel`), não um `if` no laço do soquete: seguir um farol é
-  escolher para quem mandar o token. O caminho aparece como `lan` na Frota.
+  escolher para quem mandar o token. O caminho aparece como `lan` na Torre.
 - **Repositório ligado** (`data/repo/HoundRepository.kt`): dobra os quadros do
   `SessionClient` em `sessions`, `transcript`, `approvals`, `deskState`,
   `notices` e `promptStatus`. O estado começa **vazio**, não com exemplo — dado
@@ -202,7 +215,7 @@ Hilt 2.57.1 · Ktor 3.0.3 · compileSdk/targetSdk 36 · minSdk 26.
   despejo. Queda de rede comum (menos de 200 quadros de distância) não corta
   nada: perder as últimas mensagens por um soluço de dois segundos seria pior que
   o problema. O que já estava na tela **fica** — o corte é do que chegou agora.
-  Um aviso na Frota explica por que a conversa não tem tudo.
+  Um aviso na Torre explica por que a conversa não tem tudo.
 
   **A cauda aparece a cada quadro, não no fim do replay** — e o fim da
   recuperação tem três caminhos (o `replay.done` do PC, um silêncio de 6 s depois
@@ -316,13 +329,12 @@ Tudo o que depende de rede ou de um PC de verdade está marcado com
 |---|---|
 | Transporte | o `TransportSelector` sonda os dois caminhos, mas ainda não reage à troca de rede em tempo real (nem tem o cache de 60 s que o projeto anterior usava) |
 | Leitor de QR | a tela aceita o endereço e o código digitados; o leitor com CameraX + ZXing ainda não existe (as dependências já estão no build) |
-| Notificações | `pockethound_notify` / `pockethound_ask` não chamam o sistema de notificação do Android |
+| Notificações | ✅ aprovações, perguntas (`pockethound_ask`) e fim de turno já notificam pelo serviço de primeiro plano (`notificacao/`); falta só o quadro `notice` (`pockethound_notify`) |
 | Regras | o "não perguntar de novo" já chega ao desk pelo `approval.decide`, mas a tela ainda não mostra as regras ativas |
 | Pareamento | não há leitor de QR (CameraX + ZXing já estão nas dependências) nem o handshake `hello`/`hello.ack` que grava o token no `SecureStore` |
 | Aprovações | o "não perguntar de novo" ainda não vira regra no desk |
 | Ajustes | só o modo de transporte é persistido; endereço, nome do dispositivo e prazo ainda não são salvos |
-| Replay | o cursor (`lastSeq`) é exibido mas não é usado para reenviar o buraco |
-| Notificações | `pockethound_notify` / `pockethound_ask` não chamam o sistema de notificação do Android |
+| Replay | ✅ o cursor (`lastSeq`) agora é **carregado na abertura**: um reinício de processo não reabre o anel do PC do começo — era isso que ressuscitava aprovações/perguntas já respondidas quando o quadro `resolved` tinha saído do anel |
 
 ### A dependência nativa do P2P
 
@@ -354,6 +366,7 @@ app/src/main/java/com/pockethound/app/
 │   └── transport/Transport.kt   interface + TransportMode + stubs
 ├── data/repo/HoundRepository.kt estado único da UI (dados de exemplo)
 ├── di/AppModule.kt              Json + HttpClient do Ktor
+├── notificacao/                 NotificacaoService (1º plano) · Aviso · NotificacaoTexto
 └── ui/
     ├── theme/       Color.kt · Theme.kt · Type.kt
     ├── common/      PhComponents.kt

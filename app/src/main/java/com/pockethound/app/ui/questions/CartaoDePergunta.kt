@@ -34,7 +34,7 @@ import com.pockethound.app.ui.theme.PhWarn
  * A ferramenta de pergunta do Harness chama o provedor da UI web direto, sem
  * gancho nenhum. O plugin passou a ENVOLVER esse provedor e a perguntar aqui
  * também, e quem responde primeiro vale. Sem este cartão, a pergunta aparecia só
- * no PC — ou, pior, virava um aviso na Frota sem lugar para responder.
+ * no PC — ou, pior, virava um aviso na Torre sem lugar para responder.
  *
  * @param pedido a pergunta, com as opções que o agente ofereceu.
  * @param nowMs relógio da tela, para a contagem do prazo.
@@ -87,9 +87,10 @@ fun CartaoDePergunta(
             style = MaterialTheme.typography.bodyMedium,
         )
 
-        // Respondida: a pergunta fica salva, com a resposta à mostra, e nada mais
-        // é clicável. Sumir esconderia o que foi combinado; continuar clicável
-        // fazia a mesma pergunta ser respondida várias vezes.
+        // Respondida: só a ida e volta do próprio celular aparece aqui — o toque
+        // trava o cartão na hora e o question.resolved (de qualquer tela) é quem
+        // tira ele da fila. Sumir no toque, antes do resolved, mostraria a
+        // pergunta de volta se a resposta não chegou ao PC.
         if (resposta != null) {
             val escolhido = resposta.selecionadas.firstOrNull()
             val mostrado = resposta.textoLivre?.takeIf { it.isNotBlank() } ?: escolhido

@@ -36,6 +36,7 @@ class SettingsStorage @Inject constructor(
         val transportMode = stringPreferencesKey("transport_mode")
         val lastSeq = longPreferencesKey("last_seq")
         val approvalTimeout = intPreferencesKey("approval_timeout_seconds")
+        val perguntasResolvidas = stringPreferencesKey("perguntas_resolvidas")
     }
 
     val session: Flow<SessionSnapshot> = context.settingsDataStore.data
@@ -100,6 +101,24 @@ class SettingsStorage @Inject constructor(
     suspend fun updateApprovalTimeout(seconds: Int) {
         context.settingsDataStore.edit { preferences ->
             preferences[Keys.approvalTimeout] = seconds.coerceIn(15, 600)
+        }
+    }
+
+    /**
+     * Perguntas já respondidas (ids) — a memória contra o replay ressuscitar
+     * uma pergunta. Separado do SessionSnapshot de propósito: isto é histórico,
+     * não pareamento, e não pode mudar o significado do fluxo de pareamento.
+     */
+    suspend fun readPerguntasResolvidas(): List<String> =
+        context.settingsDataStore.data.first()[Keys.perguntasResolvidas]
+            ?.split(',')
+            ?.filter { it.isNotBlank() }
+            .orEmpty()
+
+    /** Grava a lista inteira; o teto de itens é garantido por quem escreve. */
+    suspend fun updatePerguntasResolvidas(ids: List<String>) {
+        context.settingsDataStore.edit { preferences ->
+            preferences[Keys.perguntasResolvidas] = ids.joinToString(",")
         }
     }
 

@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Send
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -249,19 +250,55 @@ fun ChatScreen(viewModel: RootViewModel) {
         }
     }
 
+    // O "parar" não executa às cegas: ele abre a escolha entre limpar tudo e
+    // cancelar. "Cancelar" só fecha isto (o turno segue); "limpar tudo" para o
+    // turno, se houver, e apaga a conversa da sessão — e como não dá para
+    // desfazer, o diálogo diz isso em palavras.
+    var confirmandoParar by remember { mutableStateOf(false) }
+    if (confirmandoParar) {
+        AlertDialog(
+            onDismissRequest = { confirmandoParar = false },
+            title = { Text("Parar e limpar?") },
+            text = {
+                // Sem citar o TÍTULO da sessão: ele é o nome do papo ("aquele
+                // sobre push"...) e polui um diálogo que fala de parar e limpar.
+                Text(
+                    "Limpar tudo para o turno (se estiver rodando) e apaga a conversa " +
+                        "desta sessão. Não dá para desfazer. " +
+                        "Cancelar fecha isto sem fazer nada.",
+                )
+            },
+            confirmButton = {
+                PhButton(
+                    text = "limpar tudo",
+                    onClick = {
+                        confirmandoParar = false
+                        if (turno.running) viewModel.cancelTurn()
+                        viewModel.limparConversa()
+                    },
+                    variant = PhButtonVariant.Danger,
+                    small = true,
+                )
+            },
+            dismissButton = {
+                PhButton(
+                    text = "cancelar",
+                    onClick = { confirmandoParar = false },
+                    variant = PhButtonVariant.Ghost,
+                    small = true,
+                )
+            },
+        )
+    }
+
     PhScreenScaffold(
         title = "Chat",
         subtitle = active?.title ?: "nenhuma sessão",
         topBarActions = {
-            PhBadge(
-                text = if (link.isOnline) "ao vivo" else "offline",
-                tone = if (link.isOnline) PhTone.Ok else PhTone.Danger,
-                glyph = true,
-                modifier = Modifier.padding(end = 4.dp),
-            )
-            // "Atualizar" é SÓ o ícone de propósito: com o rótulo, três
-            // controles nesta barra de 48 dp não deixariam nada para o título da
-            // sessão. O nome fica na descrição, para quem lê a tela por leitor.
+            // Ordem: reload à esquerda dos dois status. "Atualizar" é SÓ o ícone
+            // de propósito: com o rótulo, três controles nesta barra de 48 dp não
+            // deixariam nada para o título da sessão — o nome fica na descrição,
+            // para quem lê a tela por leitor.
             PhButton(
                 text = "",
                 onClick = { viewModel.atualizar() },
@@ -270,14 +307,24 @@ fun ChatScreen(viewModel: RootViewModel) {
                 description = "atualizar a conversa",
                 loading = atualizacao.emCurso,
                 enabled = !atualizacao.emCurso,
-                modifier = Modifier.padding(end = 2.dp),
+                modifier = Modifier.padding(end = 4.dp),
             )
+            PhBadge(
+                text = if (link.isOnline) "ao vivo" else "offline",
+                tone = if (link.isOnline) PhTone.Ok else PhTone.Danger,
+                glyph = true,
+                modifier = Modifier.padding(end = 4.dp),
+            )
+            // "parar" no tamanho do badge (small): era um perigo grande demais
+            // para uma barra de status — e encostado no "ao vivo", os dois
+            // formam um par de mesma altura.
             PhButton(
                 text = "parar",
-                onClick = { viewModel.cancelTurn() },
+                onClick = { confirmandoParar = true },
                 variant = PhButtonVariant.Danger,
                 enabled = turno.running,
                 icon = Icons.Filled.Close,
+                small = true,
             )
         },
     ) { innerPadding ->

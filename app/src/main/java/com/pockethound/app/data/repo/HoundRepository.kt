@@ -27,11 +27,13 @@ import com.pockethound.app.core.model.SessionStatus
 import com.pockethound.app.core.model.SessionUpsertPayload
 import com.pockethound.app.core.model.TurnItem
 import com.pockethound.app.core.model.TurnItemKind
+import com.pockethound.app.core.model.TurnKind
 import com.pockethound.app.core.model.Workspace
 import com.pockethound.app.core.session.CaudaDoReplay
 import com.pockethound.app.core.session.ConnectionStatus
 import com.pockethound.app.core.session.ContagemDaAtualizacao
 import com.pockethound.app.core.session.EstadoDaAtualizacao
+import com.pockethound.app.core.session.FilaDePerguntas
 import com.pockethound.app.core.session.MarcaDoReplay
 import com.pockethound.app.core.session.PromptAck
 import com.pockethound.app.core.session.PromptStatus
@@ -46,6 +48,7 @@ import com.pockethound.app.core.storage.SecureStore
 import com.pockethound.app.core.storage.SettingsStorage
 import com.pockethound.app.core.transport.TransportMode
 import com.pockethound.app.core.transport.TransportResult
+import com.pockethound.app.notificacao.Aviso
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
@@ -53,10 +56,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -112,6 +119,17 @@ class HoundRepository @Inject constructor(
      */
     private val _perguntas = MutableStateFlow<List<PerguntaNaTela>>(emptyList())
     val perguntas: StateFlow<List<PerguntaNaTela>> = _perguntas.asStateFlow()
+
+    /**
+     * Perguntas já resolvidas (requestIds) — a memória que impede o replay de
+     * ressuscitar uma pergunta que o PC já teve resposta. Vem do disco na carga
+     * inicial e cresce a cada question.resolved (teto em [FilaDePerguntas]).
+     *
+     * Volatile porque a carga roda noutra coroutine e quem lê é o dobrador de
+     * quadros, em outro fio: sem isto o fio do dobrador podia ver a lista vazia.
+     */
+    @Volatile
+    private var perguntasResolvidas: List<String> = emptyList()
 
     /** O que houve com o ultimo pedido de sessao nova, para a tela contar. */
     private val _criandoSessao = MutableStateFlow<String?>(null)
@@ -170,6 +188,18 @@ class HoundRepository @Inject constructor(
      */
     private val _turnStatus = MutableStateFlow<Map<String, TurnStatus>>(emptyMap())
     val turnStatus: StateFlow<Map<String, TurnStatus>> = _turnStatus.asStateFlow()
+
+    /**
+     * Avisos para o sistema de notificação do Android.
+     *
+     * Nasce AQUI de propósito: este é o único ponto em que os quadros já
+     * passaram pela marca de replay e pelo filtro de recuperação — notificar
+     * direto do fluxo de quadros reavizaria o passado a cada reconexão. Publicar
+     * é tryEmit: quem consome é o serviço de primeiro plano, e notificação
+     * nunca pode segurar o dobrador de quadros.
+     */
+    private val _avisosSistema = MutableSharedFlow<Aviso>(replay = 0, extraBufferCapacity = 64)
+    val avisosSistema: SharedFlow<Aviso> = _avisosSistema.asSharedFlow()
 
     private val watchdog = PromptWatchdog()
     private var vigia: Job? = null
@@ -243,7 +273,14 @@ class HoundRepository @Inject constructor(
             sessionClient.frames.collect { quadro -> aplicar(quadro) }
         }
         scope.launch {
-            sessionClient.state.collect { estado ->
+            // Amortecimento do link: enquanto o Harness está mudo, o ciclo
+            // queda→tento→queda emite um estado novo a cada 1-3 s, e cada estado
+            // novo trocava o texto da bandeja e fazia o ícone piscar. O debounce
+            // só deixa passar um estado que se SUSTENTA por 4 s — o zapear nunca
+            // chega à tela, e o "voltou"/"caiu" de verdade aparece no máximo 4 s
+            // atrasado. (Os estados do StateFlow são iguais entre si quando não
+            // mudam, então um link estável não fica segurando o emissions.)
+            sessionClient.state.debounce(LINK_DEBOUNCE_MS).collect { estado ->
                 _link.value = LinkState(
                     status = when (estado.status) {
                         ConnectionStatus.Online -> LinkStatus.Online
@@ -256,7 +293,14 @@ class HoundRepository @Inject constructor(
                 )
             }
         }
-        sessionClient.start(scope)
+        // A memoria de resolvidas carrega ANTES do laco nascer: um
+        // question.request do replay que chegasse primeiro ressuscitaria uma
+        // pergunta que o PC ja tem por respondida.
+        scope.launch {
+            perguntasResolvidas = runCatching { settingsStorage.readPerguntasResolvidas() }
+                .getOrDefault(emptyList())
+            sessionClient.start(scope)
+        }
     }
 
     /** Dobra um quadro do PC no estado da tela. */
@@ -355,6 +399,22 @@ class HoundRepository @Inject constructor(
                 // por alguns segundos contra um aviso que fica mentindo na tela.
                 observarPrompt(id, quadro.payload.kind)
 
+                // "O trabalho que começou terminou" — o outro gatilho de notificação.
+                // Só o FIM de turno concluído conta: reason nulo conta como
+                // concluído (é o motivo óbvio do contrato), cancelo/erro não — avisar
+                // "concluído" de um turno que o usuário parou seria mentira. E na
+                // recuperação não avisa nada: aquilo é passado voltando do replay.
+                if (quadro.payload.kind == TurnKind.TurnEnd && !recuperando) {
+                    val motivo = quadro.payload.reason
+                    if (motivo == null || motivo == "completed") {
+                        val sessao = _sessions.value.firstOrNull { it.id == id }
+                        // Subagente terminando é rotina do Harness — ruído, não notícia.
+                        if (sessao == null || !sessao.isSubagent) {
+                            notificar(Aviso.deTurno(id, sessao?.title))
+                        }
+                    }
+                }
+
                 // O estado do turno congela na recuperação — um `turn.start` antigo
                 // dobrado como se fosse agora deixaria a sessão "trabalhando" para
                 // sempre. A exceção é a fila: ela é número absoluto do PC, então o
@@ -396,17 +456,19 @@ class HoundRepository @Inject constructor(
 
             is IncomingFrame.ApprovalRequest -> {
                 val pedido = quadro.payload
-                _approvals.update { atual ->
-                    atual.filterNot { it.requestId == pedido.requestId } + ApprovalRequest(
-                        requestId = pedido.requestId,
-                        toolName = pedido.toolName,
-                        callId = pedido.callId,
-                        reason = pedido.reason,
-                        argsPreview = pedido.args.toString().take(600),
-                        sessionId = quadro.session,
-                        expiresAt = pedido.expiresAt,
-                    )
-                }
+                val novo = ApprovalRequest(
+                    requestId = pedido.requestId,
+                    toolName = pedido.toolName,
+                    callId = pedido.callId,
+                    reason = pedido.reason,
+                    argsPreview = pedido.args.toString().take(600),
+                    sessionId = quadro.session,
+                    expiresAt = pedido.expiresAt,
+                )
+                _approvals.update { atual -> atual.filterNot { it.requestId == pedido.requestId } + novo }
+                // Fora da recuperação: o que volta no replay de um buraco grande é
+                // passado — e passado não buzina no bolso de ninguém.
+                if (!recuperando) notificar(Aviso.deAprovacao(novo))
             }
 
             is IncomingFrame.ApprovalResolved -> {
@@ -414,6 +476,9 @@ class HoundRepository @Inject constructor(
                 // 'nao perguntar de novo' - a fila esvazia de qualquer jeito.
                 _approvals.update { atual -> atual.filterNot { it.requestId == quadro.payload.requestId } }
                 _decisoes.update { atual -> atual - quadro.payload.requestId }
+                // Decidida em qualquer tela (aqui, no PC, ou por regra): a
+                // notificação parou de pedir alguma coisa — some da bandeja.
+                notificar(Aviso.Cancelar(Aviso.idAprovacao(quadro.payload.requestId)))
             }
 
             is IncomingFrame.WorkspaceList -> {
@@ -464,29 +529,36 @@ class HoundRepository @Inject constructor(
 
             is IncomingFrame.QuestionRequest -> {
                 val pedido = quadro.payload
-                _perguntas.update { atual ->
-                    atual.filterNot { it.pedido.requestId == pedido.requestId } +
-                        PerguntaNaTela(pedido = pedido)
+                // A regra pura de entra/nao-ressuscita mora em FilaDePerguntas;
+                // identidade igual = nada mudou (replay de resolvida ou trava
+                // local preservada) e, nesse caso, nao reavisa.
+                val antes = _perguntas.value
+                val depois = FilaDePerguntas.receber(antes, pedido, perguntasResolvidas)
+                if (depois !== antes) {
+                    _perguntas.value = depois
+                    // O pockethound_ask no bolso: mesma urgência da aprovação.
+                    if (!recuperando) notificar(Aviso.dePergunta(pedido))
                 }
             }
 
             is IncomingFrame.QuestionResolved -> {
-                // Respondida — na tela do PC ou aqui. A pergunta FICA na lista, com
-                // a resposta a mostra: sumir esconderia o que foi combinado, e
-                // deixar respondivel fazia responder a mesma coisa varias vezes.
                 val resolucao = quadro.payload
-                _perguntas.update { atual ->
-                    atual.map { item ->
-                        if (item.pedido.requestId != resolucao.requestId) item
-                        else item.copy(
-                            resposta = item.resposta ?: RespostaDaPergunta(
-                                selecionadas = resolucao.answers.flatMap { it.selected },
-                                textoLivre = resolucao.answers.firstNotNullOfOrNull { it.custom },
-                                por = resolucao.por,
-                            ),
-                        )
-                    }
+                // Resolvida — por mim, pelo PC ou por regra: o cartao SAI da fila.
+                // E o que o proprio answerQuestion e o hub do plugin ja diziam
+                // ("o cartao sai do celular na hora"); a versao antiga marcava
+                // respondida e mantinha, e o cartao nunca mais saia.
+                _perguntas.value = FilaDePerguntas.resolver(_perguntas.value, resolucao.requestId)
+                // E vira MEMORIA: sem isto, o replay de reconexão ou de renumeração
+                // reentrega o question.request e a pergunta volta "de pe" com a
+                // mesma pergunta ja respondida — o "reapareceu" de campo.
+                if (resolucao.requestId !in perguntasResolvidas) {
+                    perguntasResolvidas =
+                        FilaDePerguntas.marcarResolvida(perguntasResolvidas, resolucao.requestId)
+                    val paraGuardar = perguntasResolvidas
+                    scope.launch { runCatching { settingsStorage.updatePerguntasResolvidas(paraGuardar) } }
                 }
+                // Respondida em qualquer tela: retira o aviso da bandeja.
+                notificar(Aviso.Cancelar(Aviso.idPergunta(resolucao.requestId)))
             }
 
             else -> Unit
@@ -794,6 +866,25 @@ class HoundRepository @Inject constructor(
     }
 
     /**
+     * Apaga a conversa da sessão ativa da TELA — o "limpar tudo" do diálogo de
+     * parar.
+     *
+     * Só o que o usuário vê: transcrição, cauda de recuperação e a base
+     * congelada dela (sem esta, a cauda juntaria as linhas velhas de volta na
+     * hora seguinte). A marca de replay NÃO mexe, e é de propósito: é ela que
+     * impede os mesmos quadros de reencherem a conversa na próxima reconexão —
+     * limpo continua limpo. O que o PC guarda no anel não se apaga daqui (não
+     * há apagador no protocolo); some da SUA tela, que é de onde ele nunca deve
+     * ter saído sem você pedir.
+     */
+    fun limparConversa() {
+        val sessao = _activeSessionId.value ?: return
+        _transcript.update { atual -> atual - sessao }
+        cauda.remove(sessao)
+        antesDaRecuperacao = antesDaRecuperacao - sessao
+    }
+
+    /**
      * Decide uma aprovacao.
      *
      * A fila NAO e esvaziada aqui: quem esvazia e o quadro approval.resolved que o
@@ -883,10 +974,43 @@ class HoundRepository @Inject constructor(
                     ),
                 ),
             )
-            if (envio !is TransportResult.Ok) {
-                avisar(NoticeLevel.Error, "A resposta não chegou ao PC", "A pergunta continua aberta.")
+            when (envio) {
+                is TransportResult.Ok -> Unit // resposta entregue; o resolved fecha a fila.
+                is TransportResult.HttpError -> if (envio.code == 404) {
+                    // O PC RECUSOU dizendo que não conhece o pedido (unknown-request):
+                    // a pergunta já morreu lá — resolvida num caminho cujo resolved
+                    // se perdeu, ou reenvio do desk de um pedido antigo (o zumbi do
+                    // Firebase). Sem a tumba, o desk a recriaria na próxima reconexão
+                    // do celular; sem a retirada, o cartão ficaria na tela para sempre.
+                    descartarPergunta(
+                        requestId,
+                        "o PC não conhece mais esta pergunta — o cartão foi retirado e não volta.",
+                    )
+                } else {
+                    avisar(NoticeLevel.Error, "A resposta não chegou ao PC", "HTTP " + envio.code + ": a pergunta continua aberta.")
+                }
+                is TransportResult.NetworkError ->
+                    avisar(NoticeLevel.Error, "A resposta não chegou ao PC", "A pergunta continua aberta.")
             }
         }
+    }
+
+    /**
+     * O PC não conhece a pergunta: a retirada é o único desfecho honesto.
+     *
+     * Tira da fila, grava a tumba (é ela que segura o reenvio `seq: 0` do desk
+     * para sempre) e some com o aviso da bandeja — os três lugares onde a mesma
+     * mentira viveria.
+     */
+    private fun descartarPergunta(requestId: String, motivo: String) {
+        _perguntas.value = FilaDePerguntas.resolver(_perguntas.value, requestId)
+        if (requestId !in perguntasResolvidas) {
+            perguntasResolvidas = FilaDePerguntas.marcarResolvida(perguntasResolvidas, requestId)
+            val ids = perguntasResolvidas
+            scope.launch { runCatching { settingsStorage.updatePerguntasResolvidas(ids) } }
+        }
+        notificar(Aviso.Cancelar(Aviso.idPergunta(requestId)))
+        avisar(NoticeLevel.Warn, "Pergunta retirada", motivo)
     }
 
     fun markPaired(deviceId: String, pcName: String, directBaseUrl: String, token: String, p2pTicket: String = "") {
@@ -909,6 +1033,9 @@ class HoundRepository @Inject constructor(
         _transcript.value = emptyMap()
         _turnStatus.value = emptyMap()
         _approvals.value = emptyList()
+        // As perguntas também são do vínculo com o PC: sem pareamento não há
+        // de quem esperar resposta, e a fila antiga ficava órfã na tela.
+        _perguntas.value = emptyList()
         _decisoes.value = emptyMap()
         _activeSessionId.value = null
         _escolhaManual.value = false
@@ -1015,10 +1142,30 @@ class HoundRepository @Inject constructor(
          * numa rede móvel isso não sai em segundos.
          */
         const val PRAZO_ATUALIZACAO_MS = 25_000L
+
+        /** Quanto um estado de link precisa durar para chegar à tela e à bandeja. */
+        const val LINK_DEBOUNCE_MS = 4_000L
     }
 
     private fun avisar(nivel: String, titulo: String, corpo: String) {
         _notices.update { atual -> (listOf(Notice(nivel, titulo, corpo)) + atual).take(20) }
+    }
+
+    /**
+     * Manda (ou retira) uma notificação do Android — ver [Aviso].
+     *
+     * Publicar fica MUDO durante recuperação e durante o reenvio manual (↻):
+     * os dois reentregam o anel do PC do começo, e passado não buzina no bolso
+     * de ninguém — um request cujo resolved caiu fora do anel voltaria a avisar
+     * como se fosse novo (foi o zumbi "Qual canal de push" de campo). Cancelar
+     * passa sempre: retirar aviso velho nunca é ruído.
+     *
+     * tryEmit, nunca suspend: se o serviço não estiver rodando (app despareado)
+     * o aviso é descartado, e é o certo — não há ninguém para quem avisar.
+     */
+    private fun notificar(aviso: Aviso) {
+        if (aviso is Aviso.Publicar && (recuperando || revalidando)) return
+        _avisosSistema.tryEmit(aviso)
     }
 
     private fun appendToTranscript(sessionId: String, item: TurnItem) {

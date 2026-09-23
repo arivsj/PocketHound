@@ -43,7 +43,7 @@ fun FleetRoute(viewModel: RootViewModel = hiltViewModel()) {
 }
 
 /**
- * Aba Frota: sessões vivas, estado do PC e transporte ativo.
+ * Aba Torre: sessões vivas, estado do PC e transporte ativo.
  *
  * TODO(pockethound): desk.state, session.upsert e session.gone ainda não chegam —
  * os números são de exemplo e o botão "testar" só refaz a sonda local.
@@ -58,7 +58,7 @@ fun FleetScreen(viewModel: RootViewModel) {
     val notices by viewModel.notices.collectAsStateWithLifecycle()
 
     PhScreenScaffold(
-        title = "Frota",
+        title = "Torre",
         subtitle = pairing.pcName ?: "PC não pareado",
         topBarActions = {
             PhBadge(

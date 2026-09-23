@@ -68,6 +68,9 @@ class RootViewModel @Inject constructor(
     /** Perguntas do agente esperando resposta do celular. */
     val perguntas: StateFlow<List<PerguntaNaTela>> = repository.perguntas
 
+    /** Parar o turno e apagar a conversa da sessão ativa (diálogo "parar"). */
+    fun limparConversa() = repository.limparConversa()
+
     fun responderPergunta(requestId: String, questionId: String, selecionadas: List<String>, textoLivre: String?) =
         repository.answerQuestion(requestId, questionId, selecionadas, textoLivre)
 

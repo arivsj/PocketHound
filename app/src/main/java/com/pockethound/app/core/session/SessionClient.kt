@@ -152,6 +152,17 @@ class SessionClient @Inject constructor(
                 status = if (_state.value.cursor > 0) ConnectionStatus.Reconectando else ConnectionStatus.Conectando,
             )
 
+            // Cursor carregado do disco na PRIMEIRA rodada. Sem isto, todo
+            // reinício de processo reabria o anel do PC do começo, e um
+            // approval.request / question.request cujo "resolved" já tinha saído
+            // do anel (teto de 400 quadros) ressuscitava na tela como pendente —
+            // foi exatamente o "reapareceu com a mesma pergunta" de campo. O PC
+            // renumerou enquanto estávamos mortos? A máquina de renumeração
+            // (replay.done com o topo do anel) já existe e corrige isto.
+            if (_state.value.cursor == 0L && sessao.lastSeq > 0L) {
+                _state.value = _state.value.copy(cursor = sessao.lastSeq)
+            }
+
             // Sem pareamento não há o que conectar; espera e tenta de novo, para
             // o app se recuperar sozinho depois de um pareamento.
             if (!sessao.isPaired) {

@@ -303,6 +303,13 @@ fun PhButton(
     loading: Boolean = false,
     icon: ImageVector? = null,
     description: String? = null,
+    /**
+     * Tamanho de badge: mesmo vestido do [PhBadge] (padding vertical 3,
+     * labelSmall, ícone 14) para os dois conviverem na barra do topo sem um
+     * parecer solto ao lado do outro. Padrão false — quem já usou o botão
+     * grande não muda de cara.
+     */
+    small: Boolean = false,
 ) {
     val interaction = remember { MutableInteractionSource() }
     val active = enabled && !loading
@@ -316,23 +323,59 @@ fun PhButton(
     val label: @Composable RowScope.() -> Unit = {
         if (loading) {
             CircularProgressIndicator(
-                modifier = Modifier.size(14.dp),
+                modifier = Modifier.size(if (small) 12.dp else 14.dp),
                 strokeWidth = 2.dp,
                 color = tone,
             )
-            if (text.isNotBlank()) Spacer(Modifier.width(10.dp))
+            if (text.isNotBlank()) Spacer(Modifier.width(if (small) 6.dp else 10.dp))
         } else if (icon != null) {
             Icon(
                 imageVector = icon,
                 contentDescription = description,
                 tint = tone,
-                modifier = Modifier.size(16.dp),
+                modifier = Modifier.size(if (small) 14.dp else 16.dp),
             )
-            if (text.isNotBlank()) Spacer(Modifier.width(8.dp))
+            if (text.isNotBlank()) Spacer(Modifier.width(if (small) 6.dp else 8.dp))
         }
         if (text.isNotBlank()) {
-            Text(text = text.uppercase(), style = MaterialTheme.typography.labelLarge, color = tone)
+            Text(
+                text = text.uppercase(),
+                style = if (small) MaterialTheme.typography.labelSmall else MaterialTheme.typography.labelLarge,
+                color = tone,
+            )
         }
+    }
+
+
+
+    if (small) {
+        // O traje do PhBadge de propósito — e É FORA dos botões do Material:
+        // TextButton/OutlinedButton impõem contentPadding e minHeight próprios
+        // (~40 dp) que não deixam encolher nem com o param small. Pílula igual à
+        // do "ao vivo": clip, fundo tingido, borda 1 dp e o mesmo padding 10/3 —
+        // a altura nasce a mesma do badge, sem forçar medida de fora.
+        Row(
+            modifier = shared
+                .clip(MaterialTheme.shapes.small)
+                .background(if (active) tone.copy(alpha = 0.14f) else PhSurface2)
+                .border(
+                    1.dp,
+                    if (active) tone.copy(alpha = 0.45f) else PhBorder,
+                    MaterialTheme.shapes.small,
+                )
+                .clickable(
+                    interactionSource = interaction,
+                    indication = LocalIndication.current,
+                    enabled = active,
+                    onClickLabel = description,
+                    onClick = onClick,
+                )
+                .padding(horizontal = 10.dp, vertical = 3.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            label()
+        }
+        return
     }
 
     when (variant) {
